@@ -4,7 +4,7 @@ Google Forms로 받은 참석 정보를 Google Sheets에서 정리하고, 조편
 
 ## 구성
 
-- `apps-script/`: Google Sheets에 연결하는 Apps Scrip
+- `apps-script/`: Google Sheets에 연결하는 Apps Script
 - `docs/`: GitHub Pages용 모바일 공시 대시보드
 - `wiki/`: GitHub Wiki에 게시할 운영 문서와 정적 요약
 - `scripts/`: 공개 데이터 개인정보·정원·중복 검증과 Wiki 요약 생성
@@ -31,4 +31,6 @@ python -m http.server 4173 --directory docs
 4. GitHub Pages 게시 원본을 `main` 브랜치의 `/docs`로 설정합니다.
 5. GitHub Wiki를 한 번 초기화한 뒤 `wiki/`의 Markdown을 Wiki 저장소에 게시합니다.
 
-대시보드 예정 주소: <https://osh1993.github.io/26summerschool/>
+공개 대시보드: <https://osh1993.github.io/26summerschool/>
+
+> GitHub Wiki는 웹 UI에서 첫 페이지를 한 번 생성해야 `.wiki.git` 원격 저장소가 만들어집니다. 첫 페이지 생성 후 `wiki/`의 문서를 별도 Wiki 저장소에 push합니다.
