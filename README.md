@@ -28,7 +28,7 @@ python -m http.server 4173 --directory docs
 1. `apps-script/README.md`에 따라 Google Sheets와 Apps Script를 준비합니다.
 2. Apps Script 웹앱 URL을 `docs/config.js`에 설정합니다.
 3. `npm.cmd run check`로 공개 데이터 검사를 통과시킵니다.
-4. `main`에 push하면 GitHub Actions가 Pages를 배포합니다.
+4. GitHub Pages 게시 원본을 `main` 브랜치의 `/docs`로 설정합니다.
 5. GitHub Wiki를 한 번 초기화한 뒤 `wiki/`의 Markdown을 Wiki 저장소에 게시합니다.
 
 대시보드 예정 주소: <https://osh1993.github.io/26summerschool/>
