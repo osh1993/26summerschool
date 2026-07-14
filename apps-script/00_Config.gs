@@ -1,0 +1,100 @@
+/**
+ * 2026 수련회 운영 시트 공통 설정.
+ * 이 프로젝트에는 Spreadsheet ID, URL, 개인 식별값을 하드코딩하지 않는다.
+ */
+var CAMP = Object.freeze({
+  SCHEMA_VERSION: 'public-snapshot/v1',
+  TIMEZONE: 'Asia/Seoul',
+  PUBLIC_EXPORT_CHUNK_SIZE: 40000,
+  SHEETS: Object.freeze({
+    SETTINGS: 'Settings',
+    LOOKUPS: 'Lookups',
+    FIELD_MAP: 'Form_Field_Map',
+    RAW_STUDENTS: 'Form_Raw_Students',
+    RAW_STAFF: 'Form_Raw_Staff',
+    PARTICIPANTS: 'Participants',
+    PRIVATE: 'Participant_Private',
+    TIME_SLOTS: 'Time_Slots',
+    ATTENDANCE: 'Attendance',
+    RELATIONS: 'Relations',
+    GROUPS: 'Groups',
+    GROUP_ASSIGNMENTS: 'Group_Assignments',
+    LOCATIONS: 'Locations',
+    TRAVEL_DEMANDS: 'Travel_Demands',
+    VEHICLES: 'Vehicles',
+    VEHICLE_AVAILABILITY: 'Vehicle_Availability',
+    TRIPS: 'Trips',
+    TRIP_PASSENGERS: 'Trip_Passengers',
+    NOTICES: 'Notices',
+    VALIDATION: 'Validation',
+    CHANGE_LOG: 'Change_Log',
+    PUBLIC_EXPORT: 'Public_Export'
+  }),
+  HEADERS: Object.freeze({
+    Settings: ['key', 'value', 'type', 'description'],
+    Lookups: ['category', 'value', 'label', 'sort_order', 'active'],
+    Form_Field_Map: ['source_sheet', 'source_header', 'normalized_field', 'required', 'active'],
+    Form_Raw_Students: [],
+    Form_Raw_Staff: [],
+    Participants: ['participant_id', 'event_id', 'person_type', 'legal_name', 'public_id', 'public_name', 'public_consent', 'campus', 'grade_band', 'gender', 'engagement_score', 'newcomer', 'leader_candidate', 'active', 'source_response_id', 'updated_at'],
+    Participant_Private: ['participant_id', 'birth_date', 'phone', 'guardian_phone', 'insurance_status', 'private_note'],
+    Time_Slots: ['slot_id', 'event_id', 'label', 'starts_at', 'ends_at', 'core_program'],
+    Attendance: ['attendance_id', 'participant_id', 'slot_id', 'presence_status', 'locked'],
+    Relations: ['relation_id', 'participant_a_id', 'participant_b_id', 'relation_type', 'weight', 'reason_private', 'active'],
+    Groups: ['group_id', 'event_id', 'display_name', 'color', 'target_size', 'min_size', 'max_size', 'active'],
+    Group_Assignments: ['assignment_id', 'participant_id', 'group_id', 'role', 'locked', 'assignment_source', 'score_delta', 'reason_codes', 'revision', 'updated_at', 'updated_by'],
+    Locations: ['location_id', 'internal_name', 'public_label', 'area', 'full_address_private', 'public_allowed'],
+    Travel_Demands: ['demand_id', 'participant_id', 'direction', 'earliest_depart_at', 'latest_depart_at', 'origin_location_id', 'destination_location_id', 'party_size', 'demand_status', 'locked_trip_id', 'priority', 'private_note'],
+    Vehicles: ['vehicle_id', 'event_id', 'internal_label', 'public_label', 'capacity_total', 'accessible', 'route_scope', 'active', 'private_note'],
+    Vehicle_Availability: ['availability_id', 'vehicle_id', 'driver_participant_id', 'available_from', 'available_to', 'origin_scope', 'destination_scope', 'status'],
+    Trips: ['trip_id', 'event_id', 'direction', 'depart_at', 'arrival_estimate', 'origin_location_id', 'destination_location_id', 'meeting_location_id', 'vehicle_id', 'driver_participant_id', 'trip_status', 'locked', 'revision', 'updated_at'],
+    Trip_Passengers: ['trip_passenger_id', 'trip_id', 'participant_id', 'demand_id', 'boarding_status', 'seat_count', 'assignment_source', 'locked', 'updated_at'],
+    Notices: ['notice_id', 'title', 'message', 'severity', 'starts_at', 'ends_at', 'active'],
+    Validation: ['severity', 'entity_type', 'entity_id', 'rule_code', 'message_private', 'blocking', 'detected_at', 'resolved_at'],
+    Change_Log: ['change_id', 'entity_type', 'entity_id', 'field_name', 'old_value', 'new_value', 'changed_at', 'changed_by', 'reason'],
+    Public_Export: ['publish_id', 'chunk_index', 'chunk_count', 'sha256', 'json_chunk', 'generated_at', 'active']
+  }),
+  DEFAULT_SETTINGS: Object.freeze({
+    EVENT_ID: '2026-summer',
+    EVENT_NAME: '2026 여름수련회',
+    EVENT_START_DATE: '',
+    EVENT_END_DATE: '',
+    GROUP_COUNT: '6',
+    RAW_STUDENT_SHEET: 'Form_Raw_Students',
+    RAW_STAFF_SHEET: 'Form_Raw_Staff',
+    LAST_SYNC_ROW_STUDENTS: '1',
+    LAST_SYNC_ROW_STAFF: '1',
+    PUBLISH_STATUS: 'draft',
+    LAST_PUBLISH_ID: ''
+  })
+});
+
+function campSpreadsheet_() {
+  var spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  if (!spreadsheet) throw new Error('바운드 Google Spreadsheet에서 실행해야 합니다.');
+  return spreadsheet;
+}
+
+function nowIso_() {
+  return Utilities.formatDate(new Date(), CAMP.TIMEZONE, "yyyy-MM-dd'T'HH:mm:ssXXX");
+}
+
+function asBoolean_(value) {
+  if (value === true || value === 1) return true;
+  var normalized = String(value == null ? '' : value).trim().toLowerCase();
+  return ['true', '1', 'y', 'yes', '예', '동의', '참석'].indexOf(normalized) >= 0;
+}
+
+function asNumber_(value, fallback) {
+  var number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function dateToIso_(value) {
+  if (!value) return '';
+  if (Object.prototype.toString.call(value) === '[object Date]' && !isNaN(value.getTime())) {
+    return Utilities.formatDate(value, CAMP.TIMEZONE, "yyyy-MM-dd'T'HH:mm:ssXXX");
+  }
+  var parsed = new Date(value);
+  return isNaN(parsed.getTime()) ? String(value) : Utilities.formatDate(parsed, CAMP.TIMEZONE, "yyyy-MM-dd'T'HH:mm:ssXXX");
+}

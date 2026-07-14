@@ -1,0 +1,21 @@
+# 원본 행사 자료와 개인정보 파일은 공개 저장소에 포함하지 않는다.
+reference/
+*.hwp
+*.pdf
+*.xlsx
+*.xls
+
+# 하네스 중간 산출물
+_workspace/
+
+# 로컬 설정/캐시
+.env
+.env.*
+!.env.example
+.clasp.json
+credentials.json
+client_secret*.json
+token*.json
+node_modules/
+.DS_Store
+Thumbs.db

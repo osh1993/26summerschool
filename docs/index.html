@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="수련회 조편성과 차량 운행을 확인하는 공개 안내 페이지">
+  <meta name="color-scheme" content="light">
+  <title>2026 여름수련회 안내</title>
+  <link rel="stylesheet" href="assets/styles.css">
+  <script src="config.js" defer></script>
+  <script src="assets/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main-content">본문 바로가기</a>
+
+  <header class="site-header">
+    <div class="header-inner">
+      <p class="eyebrow">2026 여름수련회</p>
+      <h1>조편성 · 차량 운행 안내</h1>
+      <p class="header-copy">전달받은 참가자 코드로 조와 차량을 확인하세요.</p>
+    </div>
+  </header>
+
+  <main id="main-content" class="page-shell" tabindex="-1">
+    <section id="source-banner" class="source-banner" aria-live="polite" aria-atomic="true">
+      <span id="source-icon" class="source-icon" aria-hidden="true">⏳</span>
+      <div>
+        <strong id="source-label">공시 정보를 불러오는 중입니다</strong>
+        <p id="source-detail">잠시만 기다려 주세요.</p>
+      </div>
+    </section>
+
+    <section id="notice-section" class="notice-panel" aria-labelledby="notice-title" hidden>
+      <div class="section-heading compact">
+        <div>
+          <p class="section-kicker">꼭 확인하세요</p>
+          <h2 id="notice-title">공지</h2>
+        </div>
+      </div>
+      <div id="notice-list" class="notice-list"></div>
+    </section>
+
+    <nav class="tab-list" aria-label="공시 정보" role="tablist">
+      <button id="tab-trips" class="tab-button is-active" type="button" role="tab" aria-selected="true" aria-controls="panel-trips" data-tab="trips">
+        <span aria-hidden="true">🚐</span> 차량 운행
+      </button>
+      <button id="tab-groups" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="panel-groups" data-tab="groups" tabindex="-1">
+        <span aria-hidden="true">👥</span> 조편성
+      </button>
+    </nav>
+
+    <section id="panel-trips" class="tab-panel" role="tabpanel" aria-labelledby="tab-trips">
+      <div class="section-heading">
+        <div>
+          <p class="section-kicker">광주 ↔ 수련회장</p>
+          <h2>차량 운행</h2>
+        </div>
+        <span id="trip-count" class="count-badge" aria-live="polite"></span>
+      </div>
+
+      <div class="filters" aria-label="차량 운행 필터">
+        <label class="field">
+          <span>날짜</span>
+          <select id="date-filter">
+            <option value="all">전체 날짜</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>방향</span>
+          <select id="direction-filter">
+            <option value="all">전체 방향</option>
+            <option value="IN">IN · 수련회장으로</option>
+            <option value="OUT">OUT · 광주로</option>
+          </select>
+        </label>
+        <label class="field field-wide">
+          <span>참가자 코드 검색</span>
+          <input id="trip-search" type="search" inputmode="search" autocomplete="off" placeholder="예: A-01" aria-describedby="trip-search-help">
+          <small id="trip-search-help">코드, 차량, 집결지로 검색할 수 있습니다.</small>
+        </label>
+      </div>
+
+      <div id="trip-list" class="card-list" aria-live="polite"></div>
+      <div id="trip-empty" class="empty-state" hidden>
+        <span aria-hidden="true">🔎</span>
+        <h3>조건에 맞는 운행이 없습니다</h3>
+        <p>날짜, 방향 또는 검색어를 바꿔 보세요.</p>
+      </div>
+
+      <section id="unassigned-panel" class="summary-panel" aria-labelledby="unassigned-title" hidden>
+        <h3 id="unassigned-title">미배정 현황</h3>
+        <p>개인 명단 없이 시간대별 인원만 표시합니다.</p>
+        <ul id="unassigned-list"></ul>
+      </section>
+    </section>
+
+    <section id="panel-groups" class="tab-panel" role="tabpanel" aria-labelledby="tab-groups" hidden>
+      <div class="section-heading">
+        <div>
+          <p class="section-kicker">공개 참가자 코드 기준</p>
+          <h2>조편성</h2>
+        </div>
+        <span id="group-count" class="count-badge" aria-live="polite"></span>
+      </div>
+
+      <div class="filters single-filter" aria-label="조편성 검색">
+        <label class="field field-wide">
+          <span>참가자 코드 또는 조 검색</span>
+          <input id="group-search" type="search" inputmode="search" autocomplete="off" placeholder="예: A-01 또는 1조">
+        </label>
+      </div>
+
+      <div id="group-list" class="group-grid" aria-live="polite"></div>
+      <div id="group-empty" class="empty-state" hidden>
+        <span aria-hidden="true">🔎</span>
+        <h3>검색 결과가 없습니다</h3>
+        <p>전달받은 참가자 코드를 다시 확인해 주세요.</p>
+      </div>
+    </section>
+
+    <footer class="page-footer">
+      <p><strong>개인정보 보호 안내</strong><br>이 페이지는 공개 코드만 표시합니다. 실명이나 연락처를 입력하지 마세요.</p>
+      <p id="updated-at">공시 시각 확인 중</p>
+      <p id="publish-id" class="publish-id"></p>
+    </footer>
+  </main>
+
+  <noscript>
+    <div class="noscript-message">이 페이지에서 조와 차량을 검색하려면 JavaScript를 켜 주세요.</div>
+  </noscript>
+</body>
+</html>
