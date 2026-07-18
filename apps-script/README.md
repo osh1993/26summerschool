@@ -42,6 +42,42 @@
 
 동기화 커서는 `Settings.LAST_SYNC_ROW_*`에 저장된다. 원본 응답 행을 삽입·삭제한 경우 커서를 임의 수정하지 말고 먼저 백업한 뒤 관리자 검토를 거친다.
 
+## 2-1. 명단 파일 일괄 가져오기(Roster Import)
+
+Google Forms 외에, 이미 정리된 참석자 명단을 **다른 Google Sheets URL** 또는 **Drive의 엑셀(.xlsx) 파일**로 받아 `Participants`(+`Participant_Private`)에 병합(upsert)할 수 있다. 상세 계약은 `_workspace/07_data_architect_roster_import.md`를 따른다.
+
+### 매핑 설정
+
+명단 파일의 헤더는 자유 형식이므로, `Form_Field_Map` 탭에 `source_sheet=Roster_Import` 행으로 매핑을 등록한다. Form 매핑과 같은 탭·같은 정규 필드 어휘를 재사용한다.
+
+| source_sheet | source_header | normalized_field | required | active |
+|---|---|---|---|---|
+| Roster_Import | 명단의 성명 헤더 | legal_name | TRUE | TRUE |
+| Roster_Import | 명단의 구분 헤더 | person_type | FALSE | TRUE |
+| Roster_Import | 명단의 소속 헤더 | campus | TRUE | TRUE |
+| Roster_Import | 명단의 학년 헤더 | grade_band | FALSE | TRUE |
+| Roster_Import | 명단의 연락처 헤더 | phone | FALSE | TRUE |
+
+### 실행 순서
+
+1. 메뉴 `수련회 운영 > 2-1. 명단 파일 가져오기(미리보기)`를 실행한다.
+2. 소스 종류(`1`=Sheets URL, `2`=Drive xlsx 파일 ID), 대상 탭 이름, 소스 식별자를 프롬프트로 입력한다. **URL/파일 ID는 시트에 저장하지 않는다.**
+3. 미리보기 결과(신규/갱신/충돌/동명이인 보류/건너뜀/명단 누락 건수)와 `Validation` 탭의 상세 코드를 확인한다. 미리보기는 시트를 변경하지 않는다.
+4. 이상이 없으면 `2-2. 명단 가져오기 반영`을 실행한다. 기본은 **빈 칸만 채우고** 기존 값과 다르면 `ROSTER_FIELD_CONFLICT`로 보고만 한다. 프롬프트에 `OVERWRITE`를 입력하면 관리 필드를 명단 값으로 덮어쓴다.
+
+### 안전 규칙
+
+- 신규 참가자는 `participant_id`/`public_id`를 자동 발급하지만 `public_consent`는 항상 `FALSE`, `public_name`은 빈 값이다. 공개 명단에는 운영자 동의·승인 후에만 노출된다.
+- `public_id`, `public_name`, `public_consent`, `active`, `source_response_id`는 가져오기가 절대 덮어쓰지 않는다. 조·차량의 수동/잠금 배정도 건드리지 않는다.
+- 동명이인 등 매칭 키가 여러 명과 겹치면 병합하지 않고 `ROSTER_AMBIGUOUS_MATCH`로 해당 행만 건너뛴다. 운영자가 수동 확인한다.
+- 명단에 없는 기존 활성 참가자는 자동 비활성화하지 않고 `ROSTER_MISSING_EXISTING` 경고로만 보고한다(명단은 부분 스냅샷일 수 있다).
+- `phone`, `birth_date` 등 민감 필드는 `Participant_Private`로만 라우팅되며, `Change_Log`에는 원문 대신 `[REDACTED]`만 남긴다.
+- 매칭 키는 `이름+구분(person_type)+캠퍼스`이며, 재실행 시 `source_response_id='roster_import:<키>'` 앵커로 idempotent하게 동작한다.
+
+### Drive xlsx 변환과 권한
+
+xlsx 소스는 Advanced Drive Service(`Drive` v2)로 임시 Google Sheets로 변환해 읽고 즉시 폐기한다. 이를 위해 `appsscript.json`에 Advanced Drive Service와 `drive` 스코프가 추가되어 있다. 최초 실행 시 권한 재승인이 필요하며, 웹앱을 재배포해야 새 스코프가 반영된다. 조직 정책상 Advanced Drive Service를 켤 수 없으면, 운영자가 xlsx를 Google Sheets로 수동 변환한 뒤 소스 (A) URL 방식으로 제출한다.
+
 ## 3. 운영 데이터 입력 순서
 
 1. `Settings`에서 행사 ID/명, 시작일·종료일, 조 수를 설정한다.
@@ -63,7 +99,7 @@
 
 예: `https://script.google.com/macros/s/배포식별자/exec?view=public`
 
-URL 자체는 이 저장소에 커밋하지 말고 GitHub Pages의 환경/설정 파일에 별도로 주입한다. `view=public` 이외의 요청은 내부 시트나 범위를 조회할 수 없으며 오류 응답에도 스택·시트 정보가 없다.
+URL 자체는 이 저장소에 커밋하지 말고 정적 사이트의 설정 파일(`docs/config.js`)에 별도로 주입한다. `view=public` 이외의 요청은 내부 시트나 범위를 조회할 수 없으며 오류 응답에도 스택·시트 정보가 없다.
 
 게시 시 후보를 먼저 `active=FALSE` 상태의 URL-safe Base64 청크로 전부 저장한다. 청크 수·연속 인덱스·SHA-256·JSON 역직렬화·공개 계약을 다시 검증한 뒤 `ACTIVE_PUBLIC_PUBLISH_ID` Document Property 하나만 원자적으로 전환한다. `doGet`은 이 포인터만 읽으므로 저장·검증·포인터 전환 어느 단계가 실패해도 이전 정상 스냅샷이 계속 제공된다. `Public_Export.active`는 후보 저장 상태를 나타내는 레거시 호환 열이며 활성 여부의 기준은 포인터다.
 
@@ -73,7 +109,7 @@ URL 자체는 이 저장소에 커밋하지 말고 GitHub Pages의 환경/설정
 - 공개 저장소/Wiki에 Form 원본, Sheet ID/URL, 전화번호, 생년월일, 보호자 연락처, 상세주소, 관계·성향, 자유서술을 넣지 않는다.
 - 공개 이름 동의가 철회되면 해당 배정을 수정한 뒤 즉시 새 스냅샷을 게시한다. 필요하면 `Public_Export`의 과거 비활성 행도 운영자가 삭제한다.
 - `public_id`는 내부 ID를 해시한 값이 아니라 행사별 독립 난수이며 다른 행사에서 재사용하지 않는다.
-- GitHub Pages는 JSON 값을 `innerHTML`이 아닌 `textContent`로 렌더링한다.
+- 공개 대시보드는 JSON 값을 `innerHTML`이 아닌 `textContent`로 렌더링한다.
 - 집결 상세주소는 공개 JSON 대신 접근 통제된 별도 공지 채널을 사용한다.
 
 ## 6. 로컬 순수 로직 테스트
@@ -94,4 +130,4 @@ node apps-script/tests/core.test.js
 - 운전자 포함 정원 초과, 차량/운전자/승객 시간 중복이 없음
 - `Validation`의 blocking 오류가 0
 - `doGet?view=public`에 전화번호·실명 원본·내부 ID·상세주소가 없음
-- GitHub Pages에 전체 정원(운전자 포함)과 남은 승객 좌석을 구분 표시함
+- 공개 대시보드에 전체 정원(운전자 포함)과 남은 승객 좌석을 구분 표시함

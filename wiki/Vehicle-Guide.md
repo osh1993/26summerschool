@@ -1,6 +1,6 @@
 # 차량 운행 확인 방법
 
-상세 운행표는 [조편성·차량 운행 안내 페이지](https://osh1993.github.io/26summerschool/)에서 확인합니다.
+상세 운행표는 [조편성·차량 운행 안내 페이지](https://26summerschool.vercel.app/)에서 확인합니다.
 
 ## 방향 표시
 

@@ -1,6 +1,6 @@
 ---
 name: camp-public-dashboard
-description: "수련회 조편성·차량 운행·미배정 알림을 모바일 GitHub Pages 대시보드와 GitHub Wiki 요약으로 생성·수정·보완·재실행한다. 공시 페이지, 웹페이지, 차량표, 조별 명단, Wiki, Pages, 이전 화면 개선 요청이면 반드시 사용한다. 개인정보가 포함된 관리자 화면에는 별도 인증 설계를 요구한다."
+description: "수련회 조편성·차량 운행·미배정 알림을 모바일 Vercel 정적 대시보드와 GitHub Wiki 요약으로 생성·수정·보완·재실행한다. 공시 페이지, 웹페이지, 배포, Vercel, 차량표, 조별 명단, Wiki, 이전 화면 개선 요청이면 반드시 사용한다. 개인정보가 포함된 관리자 화면에는 별도 인증 설계를 요구한다."
 ---
 
 # 공개 대시보드
@@ -12,7 +12,7 @@ description: "수련회 조편성·차량 운행·미배정 알림을 모바일 
 4. 공지: 업데이트 시각, 변경사항, 운영자 연락 경로.
 
 ## 구현 규칙
-- GitHub Pages는 정적 HTML/CSS/JS로 구현하고 Apps Script JSON을 읽는다.
+- 정적 사이트를 HTML/CSS/JS로 구현하고 Apps Script JSON을 읽으며, `docs/`를 Vercel CLI로 배포한다(`vercel.json`의 `outputDirectory: docs`).
 - API URL이 없거나 실패하면 저장소의 비식별 샘플 JSON으로 동작한다.
 - Wiki는 JavaScript가 제거되므로 Markdown 요약과 Pages 링크를 생성한다.
 - 360px 모바일 폭, 키보드 탐색, 충분한 대비, 텍스트 상태 표시를 검증한다.

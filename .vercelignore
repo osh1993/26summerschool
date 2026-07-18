@@ -1,0 +1,14 @@
+# Vercel CLI 업로드에서 제외할 항목 (개인정보·원본 자료·하네스 산출물)
+# 배포에는 docs/ 정적 사이트와 검증 게이트(scripts/, tests/, package.json)만 필요하다.
+*.hwp
+*.pdf
+*.xlsx
+*.xls
+reference/
+_workspace/
+.agents/
+.codex/
+.claude/
+.github/
+wiki/
+apps-script/

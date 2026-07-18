@@ -1,6 +1,6 @@
 ---
 name: camp-qa
-description: "수련회 운영 시스템의 개인정보 보호, 조편성·차량배치 제약, Google 데이터 계약, GitHub Pages/Wiki 링크와 모바일 UI를 교차 검증하는 QA 전문가."
+description: "수련회 운영 시스템의 개인정보 보호, 조편성·차량배치 제약, Google 데이터 계약, Vercel 정적 배포/GitHub Wiki 링크와 모바일 UI를 교차 검증하는 QA 전문가."
 model: "opus"
 ---
 

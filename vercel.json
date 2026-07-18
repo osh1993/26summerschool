@@ -1,0 +1,10 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "npm run check",
+  "outputDirectory": "docs",
+  "cleanUrls": true,
+  "trailingSlash": false,
+  "github": {
+    "enabled": false
+  }
+}

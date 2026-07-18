@@ -3,6 +3,10 @@ import { validatePublicSnapshot } from "./validate-public-data.mjs";
 
 const [source = "docs/data/sample.json", output = "wiki/Current-Status.md"] = process.argv.slice(2);
 
+// 공개 대시보드 URL(단일 출처). Vercel 프로덕션 별칭을 기본값으로 두고,
+// 실제 배포 URL이 다르면 PUBLIC_URL 환경변수로 덮어써 Wiki를 재생성한다.
+const PUBLIC_URL = process.env.PUBLIC_URL ?? "https://26summerschool.vercel.app/";
+
 const snapshot = source.startsWith("http://") || source.startsWith("https://")
   ? await fetch(source).then((response) => {
       if (!response.ok) throw new Error(`HTTP ${response.status}: ${source}`);
@@ -16,7 +20,7 @@ if (!result.ok) throw new Error(`공개 데이터 검증 실패:\n${result.error
 const lines = [
   `# 현재 공시 요약`,
   "",
-  `> 상세하고 최신인 정보는 [수련회 운영 대시보드](https://osh1993.github.io/26summerschool/)에서 확인하세요.`,
+  `> 상세하고 최신인 정보는 [수련회 운영 대시보드](${PUBLIC_URL})에서 확인하세요.`,
   "",
   `- 행사: **${escapeMarkdown(snapshot.event.name)}**`,
   `- 기간: ${snapshot.event.starts_on} ~ ${snapshot.event.ends_on}`,
