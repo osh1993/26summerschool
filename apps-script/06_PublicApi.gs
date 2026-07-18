@@ -62,6 +62,48 @@ function buildPublicTimeSlots_(data) {
     });
 }
 
+// 참가자 person_type을 방배정 표시용 enum(student/teacher/staff)으로 정규화한다. 알 수 없는 값은 student로 본다.
+var ROOM_PERSON_TYPES = ['student', 'teacher', 'staff'];
+function roomPersonType_(value) {
+  var key = String(value == null ? '' : value).trim().toLowerCase();
+  return ROOM_PERSON_TYPES.indexOf(key) >= 0 ? key : 'student';
+}
+
+// Rooms 탭 + Room_Assignments 조인으로 공개/내부 rooms[]를 조립한다.
+// - 공개 뷰: public_name은 성 마스킹, 동의하지 않은 '학생'은 제외(교사/스탭은 방 대상이면 표시).
+// - 내부 뷰(internal=true): 각 member에 full_name(legal_name) 추가, 동의 여부 무관 전원 포함.
+// - occupancy는 실제 노출 members 수와 정확히 일치시킨다(검증기 PUBLIC_OCCUPANCY_MISMATCH 방지).
+// - active=false 방은 공개/내부 모두에서 표시하지 않는다(창고 등 운영 전용 방 숨김).
+function buildPublicRooms_(data, participants, internal) {
+  var assignmentsByRoom = CampCore.groupBy(data.roomAssignments || [], 'room_id');
+  return (data.rooms || []).filter(function (row) { return CampCore.bool(row.active); }).map(function (room) {
+    var members = (assignmentsByRoom[String(room.room_id)] || []).map(function (assignment) {
+      var person = participants[String(assignment.participant_id)];
+      if (!person) return null;
+      var personType = roomPersonType_(person.person_type);
+      // 공개 뷰에만 동의 게이트를 적용하고, 대상은 학생으로 한정한다(교사/스탭은 person_type과 함께 표시).
+      if (!internal && personType === 'student' && !CampCore.bool(person.public_consent)) return null;
+      var member = {
+        public_id: String(person.public_id),
+        public_name: CampCore.maskSurname(person.legal_name),
+        person_type: personType,
+        campus: publicCampusLabel_(person.campus)
+      };
+      if (internal) member.full_name = String(person.legal_name == null ? '' : person.legal_name);
+      return member;
+    }).filter(function (member) { return member; });
+    return {
+      room_id: String(room.room_id),
+      display_name: String(room.display_name),
+      floor: String(room.floor == null ? '' : room.floor),
+      gender_scope: String(room.gender_scope),
+      capacity: CampCore.number(room.capacity, 0),
+      occupancy: members.length,
+      members: members
+    };
+  });
+}
+
 // person_type별 교사/스탭 디렉터리(내부 스냅샷 전용). 실명 포함이므로 공개 스냅샷에는 절대 넣지 않는다.
 function buildPersonDirectory_(data, groupIdByParticipant, personType) {
   return (data.participants || [])
@@ -76,7 +118,7 @@ function buildPersonDirectory_(data, groupIdByParticipant, personType) {
     });
 }
 
-// internal=true면 각 member에 full_name(legal_name)과 최상위 teachers[]/staff[]를 덧붙인 internal-snapshot/v1을 만든다.
+// internal=true면 각 member에 full_name(legal_name)과 최상위 teachers[]/staff[], rooms[].members[].full_name을 덧붙인 internal-snapshot/v2를 만든다.
 function buildPublicSnapshot_(data, publishId, preIssues, internal) {
   var participants = CampCore.indexBy(data.participants, 'participant_id');
   var vehicles = CampCore.indexBy(data.vehicles, 'vehicle_id');
@@ -93,6 +135,8 @@ function buildPublicSnapshot_(data, publishId, preIssues, internal) {
   updatedValues.sort();
   var generatedAt = nowIso_();
   var timeSlots = buildPublicTimeSlots_(data);
+  // Phase 2: 최상위 rooms[](Rooms 탭 + Room_Assignments 조인). SCHEMA_VERSION이 v3/v2이므로 반드시 함께 조립해야 게시 검증을 통과한다.
+  var rooms = buildPublicRooms_(data, participants, internal);
   var groups = (data.groups || []).filter(function (row) { return CampCore.bool(row.active); }).map(function (group) {
     return {
       group_id: String(group.group_id),
@@ -179,6 +223,7 @@ function buildPublicSnapshot_(data, publishId, preIssues, internal) {
     publish_id: publishId,
     notices: notices,
     time_slots: timeSlots,
+    rooms: rooms,
     groups: groups,
     vehicles: publicVehicles,
     trips: publicTrips,
@@ -189,7 +234,7 @@ function buildPublicSnapshot_(data, publishId, preIssues, internal) {
   });
 }
 
-// 내부 스냅샷(internal-snapshot/v1)을 조립한다. 정적 파일로 저장하지 않고 doPost 응답으로만 반환한다.
+// 내부 스냅샷(internal-snapshot/v2)을 조립한다. 정적 파일로 저장하지 않고 doPost 응답으로만 반환한다.
 function buildInternalSnapshot_(data) {
   var publishId = 'internal-' + Utilities.formatDate(new Date(), CAMP.TIMEZONE, 'yyyyMMdd-HHmmss');
   return buildPublicSnapshot_(data, publishId, [], true);

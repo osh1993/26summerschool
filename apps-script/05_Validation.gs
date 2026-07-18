@@ -8,6 +8,8 @@ function readOperationalData_() {
     relations: tableRows_(getSheetRequired_(CAMP.SHEETS.RELATIONS)),
     groups: tableRows_(getSheetRequired_(CAMP.SHEETS.GROUPS)),
     groupAssignments: tableRows_(getSheetRequired_(CAMP.SHEETS.GROUP_ASSIGNMENTS)),
+    rooms: tableRows_(getSheetRequired_(CAMP.SHEETS.ROOMS)),
+    roomAssignments: tableRows_(getSheetRequired_(CAMP.SHEETS.ROOM_ASSIGNMENTS)),
     locations: tableRows_(getSheetRequired_(CAMP.SHEETS.LOCATIONS)),
     travelDemands: tableRows_(getSheetRequired_(CAMP.SHEETS.TRAVEL_DEMANDS)),
     vehicles: tableRows_(getSheetRequired_(CAMP.SHEETS.VEHICLES)),
@@ -29,6 +31,8 @@ function validateBeforePublish() {
 
 function validateAllForPublish_(data, snapshot) {
   var issues = CampCore.validateInternalModel(data).concat(validatePublishEligibility_(data));
+  // Phase 2: 방배정 검증(정원/성별/중복/참조/미배정)을 게시 전 검증에 통합한다.
+  issues = issues.concat(CampCore.validateRoomAssignments(data.rooms, data.roomAssignments, data.participants).issues);
   // legalNames를 함께 전달하면 validatePublicSnapshot이 assertNoFullNames(공개 불변조건 #1)를 실행해 실명 유입을 게시 전에 차단한다.
   if (snapshot) issues = issues.concat(CampCore.validatePublicSnapshot(snapshot, collectSensitiveCanaries_(data), collectLegalNames_(data)));
   return issues;
