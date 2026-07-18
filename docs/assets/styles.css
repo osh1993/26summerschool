@@ -201,7 +201,7 @@ h1 {
 
 .tab-list {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   gap: 8px;
   margin-bottom: 10px;
   padding: 5px;
@@ -765,6 +765,155 @@ summary:focus-visible {
 .sess-none {
   color: var(--muted);
   font-size: 0.8rem;
+}
+
+/* ── 방배정(방 카드) ── */
+.room-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  margin: 0 0 14px;
+  color: var(--muted);
+  font-size: 0.86rem;
+  font-weight: 700;
+}
+
+.gender-chip {
+  display: inline-flex;
+  gap: 5px;
+  align-items: center;
+  padding: 3px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #eef1f4;
+  color: var(--navy-soft);
+  font-size: 0.78rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+/* 색상은 보조 신호일 뿐이며, 아이콘(♂/♀/⚥)과 텍스트(남/여/혼성)로도 구분한다. */
+.gender-chip[data-gender="male"] {
+  border-color: #9cc4ef;
+  background: var(--blue-pale);
+  color: var(--blue-dark);
+}
+
+.gender-chip[data-gender="female"] {
+  border-color: #e6a9c8;
+  background: #fcecf4;
+  color: #98376b;
+}
+
+.gender-chip[data-gender="mixed"] {
+  border-color: #cbb6ea;
+  background: #f2ebff;
+  color: #6635a5;
+}
+
+.gender-icon {
+  font-weight: 900;
+}
+
+.room-card {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: #fff;
+}
+
+.room-card-header {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  justify-content: space-between;
+  padding: 16px;
+  border-bottom: 1px solid var(--line);
+  background: #fbfcfd;
+}
+
+.room-card h3 {
+  margin: 0 0 2px;
+  color: var(--navy);
+  font-size: 1.1rem;
+}
+
+.room-meta {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.88rem;
+  font-weight: 700;
+}
+
+.room-body {
+  padding: 16px;
+}
+
+.room-facts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 9px;
+  margin: 0 0 14px;
+}
+
+.room-facts div {
+  padding: 10px;
+  border-radius: 10px;
+  background: #f4f7fa;
+}
+
+.room-facts dt {
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.room-facts dd {
+  margin: 2px 0 0;
+  color: var(--navy);
+  font-weight: 800;
+}
+
+.room-member-list {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.room-member {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  padding: 9px 10px;
+  border-radius: 9px;
+  background: #f4f7fa;
+}
+
+.person-type-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #e9eef3;
+  color: var(--navy-soft);
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.member-campus {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.room-empty-note {
+  color: var(--muted);
+  font-size: 0.86rem;
 }
 
 /* ── 인증 내부 뷰 ── */

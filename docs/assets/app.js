@@ -1,7 +1,7 @@
 "use strict";
 
-const SUPPORTED_SCHEMAS = ["public-snapshot/v1", "public-snapshot/v2"];
-const INTERNAL_SCHEMA = "internal-snapshot/v1";
+const SUPPORTED_SCHEMAS = ["public-snapshot/v1", "public-snapshot/v2", "public-snapshot/v3"];
+const INTERNAL_SCHEMAS = ["internal-snapshot/v1", "internal-snapshot/v2"];
 const INTERNAL_SESSION_KEY = "camp.internal.snapshot";
 const FALLBACK_SOURCES = [
   { key: "latest", url: "data/latest.json" },
@@ -17,6 +17,9 @@ const state = {
     query: ""
   },
   groups: {
+    query: ""
+  },
+  rooms: {
     query: ""
   },
   internal: {
@@ -50,6 +53,19 @@ const roleLabels = {
 const directionLabels = {
   IN: "IN · 수련회장으로",
   OUT: "OUT · 광주로"
+};
+
+// 방 성별 범위: 색상만으로 구분하지 않고 아이콘+텍스트를 함께 쓴다.
+const genderScopeLabels = {
+  male: { icon: "♂", text: "남" },
+  female: { icon: "♀", text: "여" },
+  mixed: { icon: "⚥", text: "혼성" }
+};
+
+const personTypeLabels = {
+  student: "학생",
+  teacher: "교사",
+  staff: "스탭"
 };
 
 document.addEventListener("DOMContentLoaded", init);
@@ -112,6 +128,7 @@ function bindFilters() {
   const directionFilter = document.getElementById("direction-filter");
   const tripSearch = document.getElementById("trip-search");
   const groupSearch = document.getElementById("group-search");
+  const roomSearch = document.getElementById("room-search");
 
   dateFilter.addEventListener("change", () => {
     state.trips.date = dateFilter.value;
@@ -131,6 +148,11 @@ function bindFilters() {
   groupSearch.addEventListener("input", () => {
     state.groups.query = normalizeSearch(groupSearch.value);
     renderGroups();
+  });
+
+  roomSearch.addEventListener("input", () => {
+    state.rooms.query = normalizeSearch(roomSearch.value);
+    renderRooms();
   });
 }
 
@@ -190,9 +212,17 @@ function validateSnapshot(snapshot) {
     if (!Array.isArray(snapshot[key])) throw new Error(`배열 필드 누락: ${key}`);
   });
 
-  // v2는 time_slots(세션 정의)가 필수. v1은 없어도 통과(하위호환).
-  if (snapshot.schema_version === "public-snapshot/v2" && !Array.isArray(snapshot.time_slots)) {
+  // v2 이상은 time_slots(세션 정의)가 필수. v1은 없어도 통과(하위호환).
+  const isV2Plus = snapshot.schema_version === "public-snapshot/v2" || snapshot.schema_version === "public-snapshot/v3";
+  if (isV2Plus && !Array.isArray(snapshot.time_slots)) {
     throw new Error("배열 필드 누락: time_slots");
+  }
+  // v3는 rooms(방배정)가 필수. rooms가 있으면 배열이어야 한다.
+  if (snapshot.schema_version === "public-snapshot/v3" && !Array.isArray(snapshot.rooms)) {
+    throw new Error("배열 필드 누락: rooms");
+  }
+  if (snapshot.rooms != null && !Array.isArray(snapshot.rooms)) {
+    throw new Error("배열 필드 오류: rooms");
   }
 
   if (!snapshot.event || snapshot.event.timezone !== "Asia/Seoul") {
@@ -251,6 +281,7 @@ function renderAll() {
   renderNotices();
   renderTrips();
   renderGroups();
+  renderRooms();
   renderUnassigned();
   renderFooter();
 }
@@ -436,6 +467,89 @@ function renderGroups() {
   document.getElementById("group-count").textContent = `${filtered.length}개 조 · ${memberCount}명`;
 }
 
+// 방 성별 범위 칩(아이콘+텍스트 병행, 색상 단독 금지).
+function genderChip(scope) {
+  const chip = element("span", "gender-chip");
+  const meta = genderScopeLabels[scope] || genderScopeLabels.mixed;
+  chip.dataset.gender = genderScopeLabels[scope] ? scope : "mixed";
+  appendTextElement(chip, "span", meta.icon, "gender-icon").setAttribute("aria-hidden", "true");
+  appendTextElement(chip, "span", meta.text, "gender-text");
+  chip.setAttribute("aria-label", `성별 ${meta.text}`);
+  return chip;
+}
+
+function renderRooms() {
+  if (!state.snapshot) return;
+  const list = document.getElementById("room-list");
+  const empty = document.getElementById("room-empty");
+  const rooms = Array.isArray(state.snapshot.rooms) ? state.snapshot.rooms : [];
+  const filtered = rooms.filter((room) => matchesRoomSearch(room, state.rooms.query));
+
+  clearNode(list);
+  let personCount = 0;
+  filtered.forEach((room) => {
+    personCount += (room.members || []).length;
+    list.append(createRoomCard(room));
+  });
+
+  empty.hidden = filtered.length > 0;
+  document.getElementById("room-count").textContent = `${filtered.length}개 방 · ${personCount}명`;
+}
+
+function createRoomCard(room) {
+  const card = element("article", "room-card");
+  card.setAttribute("aria-labelledby", `room-title-${safeId(room.room_id)}`);
+
+  const header = element("header", "room-card-header");
+  const headText = document.createElement("div");
+  const title = element("h3");
+  title.id = `room-title-${safeId(room.room_id)}`;
+  title.textContent = room.display_name || room.room_id;
+  headText.append(title);
+  appendTextElement(headText, "p", room.floor ? `${room.floor}층` : "층 미지정", "room-meta");
+  header.append(headText, genderChip(room.gender_scope));
+
+  const body = element("div", "room-body");
+  const capacity = Number(room.capacity) || 0;
+  const occupancy = Number(room.occupancy) || (room.members || []).length;
+  const remaining = capacity - occupancy;
+  const facts = element("dl", "room-facts");
+  facts.append(
+    fact("정원", `${capacity}명`),
+    fact("현원", `${occupancy}명`),
+    fact("남은 자리", remaining > 0 ? `${remaining}자리` : "정원 마감", remaining > 0 ? "seats-good" : "seats-low")
+  );
+  body.append(facts);
+
+  const members = element("ul", "room-member-list");
+  if (!(room.members || []).length) {
+    appendTextElement(members, "li", "아직 배정된 인원이 없습니다.", "room-empty-note");
+  } else {
+    room.members.forEach((member) => {
+      const item = element("li", "room-member");
+      appendTextElement(item, "span", member.public_name || member.public_id, "public-code");
+      appendTextElement(item, "span", personTypeLabels[member.person_type] || "학생", "person-type-badge");
+      if (member.campus) appendTextElement(item, "span", member.campus, "member-campus");
+      members.append(item);
+    });
+  }
+  body.append(members);
+
+  card.append(header, body);
+  return card;
+}
+
+function matchesRoomSearch(room, query) {
+  if (!query) return true;
+  const haystack = [
+    room.room_id,
+    room.display_name,
+    room.floor,
+    ...(room.members || []).flatMap((member) => [member.public_id, member.public_name])
+  ].join(" ");
+  return normalizeSearch(haystack).includes(query);
+}
+
 function createPersonRow(person, mode) {
   const row = document.createElement("li");
   const identity = element("span", "public-code");
@@ -479,10 +593,13 @@ function renderFatalError() {
   document.getElementById("trip-list").replaceChildren();
   document.getElementById("group-table-body").replaceChildren();
   document.getElementById("group-table").hidden = true;
+  document.getElementById("room-list").replaceChildren();
+  document.getElementById("room-empty").hidden = false;
   document.getElementById("trip-empty").hidden = false;
   document.getElementById("group-empty").hidden = false;
   document.getElementById("trip-count").textContent = "0개 운행";
   document.getElementById("group-count").textContent = "0개 조";
+  document.getElementById("room-count").textContent = "0개 방";
   document.getElementById("updated-at").textContent = "공시 시각을 확인할 수 없습니다.";
 }
 
@@ -603,7 +720,7 @@ function restoreInternal() {
     const raw = sessionStorage.getItem(INTERNAL_SESSION_KEY);
     if (!raw) return;
     const snapshot = JSON.parse(raw);
-    if (snapshot && snapshot.schema_version === INTERNAL_SCHEMA) {
+    if (snapshot && INTERNAL_SCHEMAS.includes(snapshot.schema_version)) {
       state.internal.snapshot = snapshot;
       state.internal.source = "session";
       showInternalView(true);
@@ -631,7 +748,7 @@ async function submitInternal(event) {
     let snapshot;
     if (apiUrl) {
       snapshot = await postInternal(apiUrl, user, password);
-      if (!snapshot || snapshot.error || snapshot.schema_version !== INTERNAL_SCHEMA) {
+      if (!snapshot || snapshot.error || !INTERNAL_SCHEMAS.includes(snapshot.schema_version)) {
         setInternalMessage("아이디 또는 비밀번호가 올바르지 않습니다.", true);
         return;
       }
@@ -639,7 +756,7 @@ async function submitInternal(event) {
     } else {
       // 내부 API 미설정: 합성 내부 샘플로 화면을 시연한다(실데이터 아님).
       snapshot = await fetchSnapshot("data/sample-internal.json");
-      if (!snapshot || snapshot.schema_version !== INTERNAL_SCHEMA) {
+      if (!snapshot || !INTERNAL_SCHEMAS.includes(snapshot.schema_version)) {
         setInternalMessage("내부 API가 설정되지 않았고 샘플도 불러오지 못했습니다.", true);
         return;
       }
@@ -677,6 +794,7 @@ function logoutInternal() {
   state.internal.snapshot = null;
   state.internal.source = null;
   clearNode(document.getElementById("internal-table-body"));
+  clearNode(document.getElementById("internal-room-body"));
   clearNode(document.getElementById("teachers-table-body"));
   clearNode(document.getElementById("staff-table-body"));
   showInternalView(false);
@@ -731,8 +849,61 @@ function renderInternal() {
     });
   });
 
+  renderInternalRooms(snapshot);
   renderDirectory("teachers-table-body", snapshot.teachers, snapshot.groups);
   renderDirectory("staff-table-body", snapshot.staff, snapshot.groups);
+}
+
+// 내부(인증) 방배정: 전체 이름으로 방/층/성별/정원·현원과 함께 표시한다.
+function renderInternalRooms(snapshot) {
+  const body = document.getElementById("internal-room-body");
+  if (!body) return;
+  clearNode(body);
+  const rooms = Array.isArray(snapshot.rooms) ? snapshot.rooms : [];
+
+  if (!rooms.length) {
+    const row = document.createElement("tr");
+    const cell = document.createElement("td");
+    cell.colSpan = 8;
+    cell.className = "empty-cell";
+    cell.textContent = "등록된 방배정이 없습니다.";
+    row.append(cell);
+    body.append(row);
+    return;
+  }
+
+  rooms.forEach((room) => {
+    const members = room.members || [];
+    const capacity = Number(room.capacity) || 0;
+    const occupancy = Number(room.occupancy) || members.length;
+    if (!members.length) {
+      const row = document.createElement("tr");
+      appendTextElement(row, "td", room.display_name || room.room_id);
+      appendTextElement(row, "td", room.floor ? `${room.floor}층` : "-");
+      const genderCell = document.createElement("td");
+      genderCell.append(genderChip(room.gender_scope));
+      row.append(genderCell);
+      appendTextElement(row, "td", `${capacity} · ${occupancy}`);
+      const note = appendTextElement(row, "td", "배정 인원 없음", "empty-cell");
+      note.colSpan = 4;
+      body.append(row);
+      return;
+    }
+    members.forEach((member) => {
+      const row = document.createElement("tr");
+      appendTextElement(row, "td", room.display_name || room.room_id);
+      appendTextElement(row, "td", room.floor ? `${room.floor}층` : "-");
+      const genderCell = document.createElement("td");
+      genderCell.append(genderChip(room.gender_scope));
+      row.append(genderCell);
+      appendTextElement(row, "td", `${capacity} · ${occupancy}`);
+      appendTextElement(row, "td", member.full_name || member.public_name || "-", "full-name");
+      appendTextElement(row, "td", member.public_id || "-", "code-sub");
+      appendTextElement(row, "td", personTypeLabels[member.person_type] || "학생");
+      appendTextElement(row, "td", member.campus || "-");
+      body.append(row);
+    });
+  });
 }
 
 function renderDirectory(bodyId, people, groups) {

@@ -378,4 +378,129 @@ assert.ok(ruleCodes(Core.validateInternalSnapshot(internalExtra, [])).includes('
 // 공개 검증기는 full_name/teachers를 거부(내부 전용 필드)
 assert.ok(ruleCodes(Core.validatePublicSnapshot(validInternalSnapshot(), [])).includes('PUBLIC_FIELD_NOT_ALLOWED'));
 
+// ── 방배정(Room) 검증 순수 로직 ──────────────────────────────────────────
+const roomsBasic = [
+  { room_id: 'R01', display_name: '101호', capacity: 2, gender_scope: 'male', active: true },
+  { room_id: 'R02', display_name: '201호', capacity: 2, gender_scope: 'female', active: true },
+  { room_id: 'R09', display_name: '창고', capacity: 4, gender_scope: 'mixed', active: false }
+];
+const partsBasic = [
+  { participant_id: 'p1', gender: 'male', active: true },
+  { participant_id: 'p2', gender: 'female', active: true },
+  { participant_id: 'p3', gender: 'male', active: true }
+];
+// 정상 배정 + 미배정 경고(p3만)
+const roomOk = Core.validateRoomAssignments(roomsBasic, [
+  { room_id: 'R01', participant_id: 'p1' },
+  { room_id: 'R02', participant_id: 'p2' }
+], partsBasic);
+assert.strictEqual(roomOk.summary.blocking, 0);
+assert.deepStrictEqual(ruleCodes(roomOk.issues), ['ROOM_UNASSIGNED']);
+assert.strictEqual(roomOk.summary.assignments, 2);
+// 정원 초과(차단): R01 정원 2에 남 3명
+const roomOver = Core.validateRoomAssignments(roomsBasic, [
+  { room_id: 'R01', participant_id: 'p1' },
+  { room_id: 'R01', participant_id: 'p3' },
+  { room_id: 'R01', participant_id: 'pX' }
+], partsBasic.concat([{ participant_id: 'pX', gender: 'male', active: true }]));
+assert.ok(ruleCodes(roomOver.issues).includes('ROOM_OVER_CAPACITY'));
+assert.ok(Core.blockingIssues(roomOver.issues).some((i) => i.rule_code === 'ROOM_OVER_CAPACITY'));
+// 성별 불일치(차단): 남성 방에 여성 배정 / mixed는 제약 없음
+const roomGender = Core.validateRoomAssignments(roomsBasic, [{ room_id: 'R01', participant_id: 'p2' }], partsBasic);
+assert.ok(ruleCodes(roomGender.issues).includes('ROOM_GENDER_MISMATCH'));
+const roomMixed = Core.validateRoomAssignments(
+  [{ room_id: 'RM', capacity: 4, gender_scope: 'mixed', active: true }],
+  [{ room_id: 'RM', participant_id: 'p1' }, { room_id: 'RM', participant_id: 'p2' }],
+  partsBasic
+);
+assert.ok(!ruleCodes(roomMixed.issues).includes('ROOM_GENDER_MISMATCH'));
+// 중복 배정(차단): p1이 두 방에
+const roomDup = Core.validateRoomAssignments(roomsBasic, [
+  { room_id: 'R01', participant_id: 'p1' },
+  { room_id: 'R02', participant_id: 'p1' }
+], partsBasic);
+assert.ok(ruleCodes(roomDup.issues).includes('ROOM_DUPLICATE_ASSIGNMENT'));
+// 알 수 없는 참조(차단): 없는 방/참가자 각각
+const roomRef = Core.validateRoomAssignments(roomsBasic, [
+  { room_id: 'R99', participant_id: 'p1' },
+  { room_id: 'R01', participant_id: 'pZZZ' }
+], partsBasic);
+assert.strictEqual(ruleCodes(roomRef.issues).filter((c) => c === 'ROOM_UNKNOWN_REF').length, 2);
+// 비활성 방 배정(경고)
+const roomInactive = Core.validateRoomAssignments(roomsBasic, [
+  { room_id: 'R09', participant_id: 'p1' },
+  { room_id: 'R09', participant_id: 'p2' },
+  { room_id: 'R09', participant_id: 'p3' }
+], partsBasic);
+const inactiveIssue = roomInactive.issues.find((i) => i.rule_code === 'ROOM_INACTIVE_TARGET');
+assert.ok(inactiveIssue && inactiveIssue.blocking === false);
+// 미배정(경고): 활성 참가자 전원 미배정, 모두 비차단
+const roomUnassigned = Core.validateRoomAssignments(roomsBasic, [], partsBasic);
+assert.strictEqual(ruleCodes(roomUnassigned.issues).filter((c) => c === 'ROOM_UNASSIGNED').length, 3);
+roomUnassigned.issues.forEach((i) => assert.strictEqual(i.blocking, false));
+
+// ── 공개 스냅샷 v3 검증(rooms 수용/거부) ─────────────────────────────────
+function validV3Snapshot() {
+  const s = validV2Snapshot();
+  s.schema_version = 'public-snapshot/v3';
+  s.rooms = [
+    { room_id: 'R01', display_name: '101호', floor: '1', gender_scope: 'male', capacity: 4, occupancy: 1,
+      members: [{ public_id: 'P-ABC234', public_name: '김○○', person_type: 'student', campus: '임동' }] },
+    { room_id: 'R02', display_name: '201호', floor: '2', gender_scope: 'mixed', capacity: 4, occupancy: 0, members: [] }
+  ];
+  return s;
+}
+// v1/v2 하위호환 유지 + v3 정본 통과
+assert.deepStrictEqual(Core.validatePublicSnapshot(validSnapshot(), []), []);
+assert.deepStrictEqual(Core.validatePublicSnapshot(validV2Snapshot(), []), []);
+assert.deepStrictEqual(Core.validatePublicSnapshot(validV3Snapshot(), []), []);
+// v3인데 rooms 누락 → 필수 필드 누락
+const v3NoRooms = validV3Snapshot(); delete v3NoRooms.rooms;
+assert.ok(ruleCodes(Core.validatePublicSnapshot(v3NoRooms, [])).includes('PUBLIC_REQUIRED_FIELD_MISSING'));
+// gender_scope enum 위반
+const v3BadGender = validV3Snapshot(); v3BadGender.rooms[0].gender_scope = 'coed';
+assert.ok(ruleCodes(Core.validatePublicSnapshot(v3BadGender, [])).includes('PUBLIC_ENUM_INVALID'));
+// occupancy 불일치
+const v3BadOcc = validV3Snapshot(); v3BadOcc.rooms[0].occupancy = 5;
+assert.ok(ruleCodes(Core.validatePublicSnapshot(v3BadOcc, [])).includes('PUBLIC_OCCUPANCY_MISMATCH'));
+// room person_type enum 위반
+const v3BadType = validV3Snapshot(); v3BadType.rooms[0].members[0].person_type = 'volunteer';
+assert.ok(ruleCodes(Core.validatePublicSnapshot(v3BadType, [])).includes('PUBLIC_ENUM_INVALID'));
+// room 허용 외 필드 거부(내부 전용 private_note)
+const v3RoomExtra = validV3Snapshot(); v3RoomExtra.rooms[0].private_note = '비고';
+assert.ok(ruleCodes(Core.validatePublicSnapshot(v3RoomExtra, [])).includes('PUBLIC_FIELD_NOT_ALLOWED'));
+// room member 실명 필드(full_name) 공개 유입 거부
+const v3FullName = validV3Snapshot(); v3FullName.rooms[0].members[0].full_name = '실명';
+assert.ok(ruleCodes(Core.validatePublicSnapshot(v3FullName, [])).includes('PUBLIC_FIELD_NOT_ALLOWED'));
+// room_id 중복
+const v3Dup = validV3Snapshot(); v3Dup.rooms[1].room_id = 'R01';
+assert.ok(ruleCodes(Core.validatePublicSnapshot(v3Dup, [])).includes('PUBLIC_DUPLICATE_ID'));
+// 공개 rooms 표시명이 전체 실명과 동일 → 성 마스킹 실패
+const v3Leak = validV3Snapshot(); v3Leak.rooms[0].members[0].public_name = '홍길동';
+assert.ok(ruleCodes(Core.validatePublicSnapshot(v3Leak, [], ['홍길동'])).includes('PUBLIC_FULL_NAME_LEAK'));
+assert.deepStrictEqual(Core.assertNoFullNames(validV3Snapshot(), ['홍길동']), []); // 마스킹된 표시명은 통과
+
+// ── 내부 스냅샷 v2 검증(rooms full_name 수용) ────────────────────────────
+function validInternalV2Snapshot() {
+  const s = validV3Snapshot();
+  s.schema_version = 'internal-snapshot/v2';
+  s.groups[0].members[0].full_name = '홍길동';
+  s.groups[0].members[1].full_name = '남궁민수';
+  s.teachers = [{ participant_id: 'pt_t1', full_name: '이선생', campus: '임동', group_id: 'G01' }];
+  s.staff = [{ participant_id: 'pt_s1', full_name: '박스탭', campus: '수완', group_id: null }];
+  s.rooms[0].members[0].full_name = '홍길동'; // 내부 뷰는 전체 이름 정상 노출
+  return s;
+}
+assert.deepStrictEqual(Core.validateInternalSnapshot(validInternalV2Snapshot(), []), []);
+// 내부는 rooms full_name(실명) 노출이 정상 → 유출/미허용 이슈 없음
+assert.ok(!ruleCodes(Core.validateInternalSnapshot(validInternalV2Snapshot(), [])).includes('PUBLIC_FULL_NAME_LEAK'));
+assert.ok(!ruleCodes(Core.validateInternalSnapshot(validInternalV2Snapshot(), [])).includes('PUBLIC_FIELD_NOT_ALLOWED'));
+// 내부 v1 하위호환 유지
+assert.deepStrictEqual(Core.validateInternalSnapshot(validInternalSnapshot(), []), []);
+// v2 내부인데 rooms 누락 → 필수 필드 누락
+const iv2NoRooms = validInternalV2Snapshot(); delete iv2NoRooms.rooms;
+assert.ok(ruleCodes(Core.validateInternalSnapshot(iv2NoRooms, [])).includes('PUBLIC_REQUIRED_FIELD_MISSING'));
+// 공개 검증기는 내부 v2(rooms full_name/teachers)를 거부
+assert.ok(ruleCodes(Core.validatePublicSnapshot(validInternalV2Snapshot(), [])).includes('PUBLIC_FIELD_NOT_ALLOWED'));
+
 console.log('Core tests passed');

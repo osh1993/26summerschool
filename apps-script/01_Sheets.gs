@@ -11,6 +11,8 @@ function onOpen() {
     .addItem('3-1. 조 개수 맞추기(Settings 기준)', 'ensureGroupCountFromSettings')
     .addItem('3-2. 표준 세션(7슬롯) 시드', 'seedStandardTimeSlots')
     .addItem('4. 차량 수요 배정', 'assignVehicleDemands')
+    .addItem('4-1. 방 개수 맞추기(Settings 기준)', 'ensureRoomCountFromSettings')
+    .addItem('4-2. 방배정 검증', 'validateRoomAssignmentsMenu')
     .addSeparator()
     .addItem('5. 게시 전 검증', 'validateBeforePublish')
     .addItem('6. 공개 스냅샷 게시', 'publishPublicSnapshot')
@@ -32,6 +34,7 @@ function initializeCampWorkbook() {
     seedSettings_();
     seedLookups_();
     seedGroups_();
+    seedRooms_();
     seedTimeSlots_();
     formatOperationalSheets_();
     SpreadsheetApp.getUi().alert('운영 시트 초기화가 완료되었습니다. Settings와 Form_Field_Map을 먼저 확인하세요.');
@@ -51,6 +54,111 @@ function seedGroups_() {
     rows.push(['G' + String(i).padStart(2, '0'), settings.EVENT_ID, i + '조', colors[(i - 1) % colors.length], '', 0, 999, true]);
   }
   sheet.getRange(2, 1, rows.length, rows[0].length).setValues(rows);
+}
+
+/** Rooms 탭이 비어 있으면 Settings.ROOM_COUNT 개수만큼 기본 방을 시드한다(멱등). 기존 방이 있으면 건드리지 않는다. */
+function seedRooms_() {
+  var sheet = getSheetRequired_(CAMP.SHEETS.ROOMS);
+  if (sheet.getLastRow() > 1) return;
+  var settings = getSettings_();
+  var count = Math.max(1, Number(settings.ROOM_COUNT || 8));
+  appendObjects_(CAMP.SHEETS.ROOMS, buildNewRoomRows_([], count, settings.EVENT_ID || CAMP.DEFAULT_SETTINGS.EVENT_ID));
+}
+
+/** 기존 방 번호와 겹치지 않는 신규 방 행을 생성한다. 기본 정원 8, gender_scope=mixed(제약 없음)로 두고 운영자가 조정한다. */
+function buildNewRoomRows_(existingRows, count, eventId) {
+  var maxNumber = 0;
+  existingRows.forEach(function (row) {
+    var match = String(row.room_id || '').match(/(\d+)/);
+    if (match) maxNumber = Math.max(maxNumber, Number(match[1]));
+    var nameMatch = String(row.display_name || '').match(/(\d+)/);
+    if (nameMatch) maxNumber = Math.max(maxNumber, Number(nameMatch[1]));
+  });
+  var rows = [];
+  for (var i = 1; i <= count; i += 1) {
+    var n = maxNumber + i;
+    rows.push({
+      room_id: 'R' + String(n).padStart(2, '0'),
+      event_id: eventId,
+      display_name: n + '호실',
+      capacity: 8,
+      floor: '',
+      gender_scope: 'mixed',
+      active: true,
+      private_note: ''
+    });
+  }
+  return rows;
+}
+
+/**
+ * 메뉴: Settings.ROOM_COUNT(권위값)에 맞춰 Rooms 활성 행을 N개로 맞춘다.
+ * 기존 방 이름·정원·성별은 보존한다. 부족하면 비활성 방 재활성화 후 신규 생성,
+ * 초과하면 배정이 없는 여분 방만 비활성화하고 배정이 있는 방은 보존/경고한다(그룹 로직과 동일 패턴).
+ */
+function ensureRoomCountFromSettings() {
+  var lock = LockService.getDocumentLock();
+  lock.waitLock(30000);
+  try {
+    var settings = getSettings_();
+    var target = Math.max(1, Number(settings.ROOM_COUNT || 8));
+    var sheet = getSheetRequired_(CAMP.SHEETS.ROOMS);
+    var idx = headerIndex_(sheet);
+    var rows = tableRows_(sheet);
+    var active = rows.filter(function (row) { return CampCore.bool(row.active); });
+    var inactive = rows.filter(function (row) { return !CampCore.bool(row.active); });
+    var messages = [];
+
+    if (active.length < target) {
+      var need = target - active.length;
+      var reactivate = inactive.slice(0, need);
+      reactivate.forEach(function (row) { sheet.getRange(row._row, idx.active + 1).setValue(true); });
+      need -= reactivate.length;
+      if (need > 0) {
+        appendObjects_(CAMP.SHEETS.ROOMS, buildNewRoomRows_(rows, need, settings.EVENT_ID || CAMP.DEFAULT_SETTINGS.EVENT_ID));
+      }
+      messages.push('활성 방을 ' + target + '개로 맞췄습니다(재활성화 ' + reactivate.length + ' / 신규 ' + Math.max(0, need) + ').');
+    } else if (active.length > target) {
+      var assignmentsByRoom = CampCore.groupBy(tableRows_(getSheetRequired_(CAMP.SHEETS.ROOM_ASSIGNMENTS)), 'room_id');
+      // 방 번호 역순으로 여분을 비활성화 후보로 본다. 배정이 있는 방은 건너뛴다.
+      var ordered = active.slice().sort(function (a, b) { return String(b.room_id).localeCompare(String(a.room_id)); });
+      var toRemove = active.length - target;
+      var deactivated = 0, blockedByAssignment = 0;
+      ordered.forEach(function (row) {
+        if (deactivated >= toRemove) return;
+        var hasAssignments = (assignmentsByRoom[String(row.room_id)] || []).length > 0;
+        if (hasAssignments) { blockedByAssignment += 1; return; }
+        sheet.getRange(row._row, idx.active + 1).setValue(false);
+        deactivated += 1;
+      });
+      messages.push('여분 방 ' + deactivated + '개를 비활성화했습니다.');
+      if (blockedByAssignment > 0) messages.push('배정이 남은 방 ' + blockedByAssignment + '개는 보존했습니다. 수동으로 정리한 뒤 다시 실행하세요.');
+    } else {
+      messages.push('활성 방이 이미 ' + target + '개입니다(변경 없음).');
+    }
+    SpreadsheetApp.getUi().alert(messages.join('\n'));
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/** 메뉴: 방배정 검증(정원/성별/중복/참조/미배정). 순수 로직은 CampCore.validateRoomAssignments가 담당하고 결과를 Validation 탭에 append 한다. */
+function validateRoomAssignmentsMenu() {
+  var lock = LockService.getDocumentLock();
+  lock.waitLock(30000);
+  try {
+    var rooms = tableRows_(getSheetRequired_(CAMP.SHEETS.ROOMS));
+    var assignments = tableRows_(getSheetRequired_(CAMP.SHEETS.ROOM_ASSIGNMENTS));
+    var participants = tableRows_(getSheetRequired_(CAMP.SHEETS.PARTICIPANTS));
+    var result = CampCore.validateRoomAssignments(rooms, assignments, participants);
+    appendValidationIssues_(result.issues);
+    var blocking = result.summary.blocking;
+    SpreadsheetApp.getUi().alert(blocking
+      ? '방배정 차단 오류 ' + blocking + '건입니다. Validation 탭을 확인하세요.'
+      : '방배정 차단 오류가 없습니다. 경고 ' + result.summary.warning + '건입니다.');
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 /** 표준 7세션(첫날 오전/오후/밤, 2일 오전/오후/밤, 3일 오전)을 Time_Slots에 멱등 시드한다. 이미 있으면 중복 생성하지 않는다. */
@@ -206,7 +314,15 @@ function seedSettings_() {
 
 function seedLookups_() {
   var sheet = getSheetRequired_(CAMP.SHEETS.LOOKUPS);
-  if (sheet.getLastRow() > 1) return;
+  var genderScopeRows = [
+    ['gender_scope', 'male', '남', 1, true], ['gender_scope', 'female', '여', 2, true], ['gender_scope', 'mixed', '혼성', 3, true]
+  ];
+  if (sheet.getLastRow() > 1) {
+    // 기존 워크북 마이그레이션: gender_scope 카테고리가 없으면 후행 추가(멱등).
+    var hasGenderScope = tableRows_(sheet).some(function (row) { return String(row.category) === 'gender_scope'; });
+    if (!hasGenderScope) sheet.getRange(sheet.getLastRow() + 1, 1, genderScopeRows.length, genderScopeRows[0].length).setValues(genderScopeRows);
+    return;
+  }
   var rows = [
     ['person_type', 'student', '학생', 1, true], ['person_type', 'teacher', '교사', 2, true], ['person_type', 'staff', '스탭', 3, true],
     ['role', 'member', '조원', 1, true], ['role', 'leader', '조장', 2, true], ['role', 'sub_leader', '부조장', 3, true], ['role', 'teacher', '조선생님', 4, true],
@@ -214,7 +330,7 @@ function seedLookups_() {
     ['direction', 'IN', '광주→수련회장', 1, true], ['direction', 'OUT', '수련회장→광주', 2, true],
     ['boarding_status', 'planned', '예정', 1, true], ['boarding_status', 'confirmed', '확정', 2, true], ['boarding_status', 'boarded', '탑승', 3, true], ['boarding_status', 'cancelled', '취소', 4, true],
     ['trip_status', 'draft', '초안', 1, true], ['trip_status', 'open', '모집', 2, true], ['trip_status', 'confirmed', '확정', 3, true], ['trip_status', 'cancelled', '취소', 4, true]
-  ];
+  ].concat(genderScopeRows);
   sheet.getRange(2, 1, rows.length, rows[0].length).setValues(rows);
 }
 

@@ -1,5 +1,5 @@
 {
-  "schema_version": "internal-snapshot/v1",
+  "schema_version": "internal-snapshot/v2",
   "event": {
     "event_id": "sample-event",
     "name": "수련회 샘플",
@@ -19,6 +19,54 @@
     { "slot_id": "S_D2_AFTERNOON", "label": "2일차 오후", "day_index": 2, "part": "afternoon" },
     { "slot_id": "S_D2_NIGHT", "label": "2일차 밤", "day_index": 2, "part": "night" },
     { "slot_id": "S_D3_MORNING", "label": "3일차 오전", "day_index": 3, "part": "morning" }
+  ],
+  "rooms": [
+    {
+      "room_id": "R-101",
+      "display_name": "101호",
+      "floor": "1",
+      "gender_scope": "male",
+      "capacity": 4,
+      "occupancy": 2,
+      "members": [
+        { "public_id": "P-S01", "public_name": "김○○", "full_name": "김하늘", "person_type": "student", "campus": "임동" },
+        { "public_id": "P-S03", "public_name": "박○", "full_name": "박솔", "person_type": "student", "campus": "임동" }
+      ]
+    },
+    {
+      "room_id": "R-201",
+      "display_name": "201호",
+      "floor": "2",
+      "gender_scope": "female",
+      "capacity": 4,
+      "occupancy": 2,
+      "members": [
+        { "public_id": "P-S02", "public_name": "이○○", "full_name": "이바다", "person_type": "student", "campus": "수완" },
+        { "public_id": "P-S05", "public_name": "최○○", "full_name": "최가람", "person_type": "student", "campus": "임동" }
+      ]
+    },
+    {
+      "room_id": "R-102",
+      "display_name": "102호",
+      "floor": "1",
+      "gender_scope": "male",
+      "capacity": 4,
+      "occupancy": 1,
+      "members": [
+        { "public_id": "P-S06", "public_name": "남궁○○", "full_name": "남궁도훈", "person_type": "student", "campus": "기타" }
+      ]
+    },
+    {
+      "room_id": "R-T01",
+      "display_name": "교사실 A",
+      "floor": "1",
+      "gender_scope": "mixed",
+      "capacity": 2,
+      "occupancy": 1,
+      "members": [
+        { "public_id": "P-S04", "public_name": "정○○", "full_name": "정도움", "person_type": "teacher", "campus": "수완" }
+      ]
+    }
   ],
   "groups": [
     {

@@ -47,6 +47,9 @@
       <button id="tab-groups" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="panel-groups" data-tab="groups" tabindex="-1">
         <span aria-hidden="true">👥</span> 조편성
       </button>
+      <button id="tab-rooms" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="panel-rooms" data-tab="rooms" tabindex="-1">
+        <span aria-hidden="true">🛏️</span> 방배정
+      </button>
       <button id="tab-internal" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="panel-internal" data-tab="internal" tabindex="-1">
         <span aria-hidden="true">🔒</span> 내부 명단
       </button>
@@ -137,6 +140,36 @@
       </div>
     </section>
 
+    <section id="panel-rooms" class="tab-panel" role="tabpanel" aria-labelledby="tab-rooms" hidden>
+      <div class="section-heading">
+        <div>
+          <p class="section-kicker">숙소 방배정</p>
+          <h2>방배정</h2>
+        </div>
+        <span id="room-count" class="count-badge" aria-live="polite"></span>
+      </div>
+
+      <div class="filters single-filter" aria-label="방배정 검색">
+        <label class="field field-wide">
+          <span>방 이름 또는 참가자 코드 검색</span>
+          <input id="room-search" type="search" inputmode="search" autocomplete="off" placeholder="예: 101호 또는 P-01">
+        </label>
+      </div>
+
+      <p class="room-legend">성별 표기:
+        <span class="gender-chip" data-gender="male"><span aria-hidden="true">♂</span> 남</span>
+        <span class="gender-chip" data-gender="female"><span aria-hidden="true">♀</span> 여</span>
+        <span class="gender-chip" data-gender="mixed"><span aria-hidden="true">⚥</span> 혼성</span>
+      </p>
+
+      <div id="room-list" class="card-list" aria-live="polite"></div>
+      <div id="room-empty" class="empty-state" hidden>
+        <span aria-hidden="true">🔎</span>
+        <h3>표시할 방이 없습니다</h3>
+        <p>방 이름 또는 참가자 코드를 다시 확인해 주세요.</p>
+      </div>
+    </section>
+
     <section id="panel-internal" class="tab-panel" role="tabpanel" aria-labelledby="tab-internal" hidden>
       <div class="section-heading">
         <div>
@@ -188,6 +221,26 @@
               </tr>
             </thead>
             <tbody id="internal-table-body"></tbody>
+          </table>
+        </div>
+
+        <h3 class="internal-subhead">방배정 (전체 이름)</h3>
+        <div class="table-scroll">
+          <table class="roster-table">
+            <caption class="sr-only">내부 방배정: 방, 층, 성별, 정원·현원, 전체 이름, 코드, 구분, 캠퍼스</caption>
+            <thead>
+              <tr>
+                <th scope="col">방</th>
+                <th scope="col">층</th>
+                <th scope="col">성별</th>
+                <th scope="col">정원 · 현원</th>
+                <th scope="col">이름</th>
+                <th scope="col">코드</th>
+                <th scope="col">구분</th>
+                <th scope="col">캠퍼스</th>
+              </tr>
+            </thead>
+            <tbody id="internal-room-body"></tbody>
           </table>
         </div>
 

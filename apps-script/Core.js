@@ -196,8 +196,8 @@ var CampCore = (function () {
   }
 
   var ALLOWED = Object.freeze({
-    // v1 최상위 + v2 신규 time_slots. teachers/staff는 내부 스냅샷에서만 추가 허용.
-    root: ['schema_version', 'event', 'generated_at', 'updated_at', 'publish_id', 'notices', 'groups', 'vehicles', 'trips', 'unassigned_summary', 'validation', 'time_slots'],
+    // v1 최상위 + v2 신규 time_slots + v3 신규 rooms. teachers/staff는 내부 스냅샷에서만 추가 허용.
+    root: ['schema_version', 'event', 'generated_at', 'updated_at', 'publish_id', 'notices', 'groups', 'vehicles', 'trips', 'unassigned_summary', 'validation', 'time_slots', 'rooms'],
     rootInternal: ['teachers', 'staff'],
     event: ['event_id', 'name', 'starts_on', 'ends_on', 'timezone'],
     notice: ['notice_id', 'title', 'message', 'severity', 'starts_at', 'ends_at'],
@@ -206,6 +206,10 @@ var CampCore = (function () {
     member: ['public_id', 'public_name', 'role', 'campus', 'session_slots'],
     memberInternal: ['full_name'],
     timeSlot: ['slot_id', 'label', 'day_index', 'part'],
+    // v3 방배정: 공개는 성 마스킹 표시명, 내부는 full_name 추가 허용.
+    room: ['room_id', 'display_name', 'floor', 'gender_scope', 'capacity', 'occupancy', 'members'],
+    roomMember: ['public_id', 'public_name', 'person_type', 'campus'],
+    roomMemberInternal: ['full_name'],
     personDirectory: ['participant_id', 'full_name', 'campus', 'group_id'],
     vehicle: ['vehicle_id', 'label', 'capacity', 'accessibility'],
     trip: ['trip_id', 'date', 'time', 'direction', 'origin', 'destination', 'meeting_point', 'status', 'vehicle_id', 'driver_label', 'capacity', 'passenger_count', 'remaining_seats', 'passengers', 'updated_at'],
@@ -217,8 +221,10 @@ var CampCore = (function () {
 
   var MEMBER_ROLES = ['member', 'leader', 'sub_leader', 'teacher'];
   var SESSION_PARTS = ['morning', 'afternoon', 'night'];
-  var PUBLIC_SCHEMA_VERSIONS = ['public-snapshot/v1', 'public-snapshot/v2'];
-  var INTERNAL_SCHEMA_VERSION = 'internal-snapshot/v1';
+  var GENDER_SCOPES = ['male', 'female', 'mixed'];
+  var ROOM_PERSON_TYPES = ['student', 'teacher', 'staff'];
+  var PUBLIC_SCHEMA_VERSIONS = ['public-snapshot/v1', 'public-snapshot/v2', 'public-snapshot/v3'];
+  var INTERNAL_SCHEMA_VERSIONS = ['internal-snapshot/v1', 'internal-snapshot/v2'];
 
   function unknownKeys(object, allowed) {
     if (!object || typeof object !== 'object' || Array.isArray(object)) return ['<not-object>'];
@@ -267,6 +273,15 @@ var CampCore = (function () {
         }
       });
     });
+    // v3: 공개 rooms members의 public_name도 실명 유입을 검사한다(방배정 뷰 성 마스킹 강제).
+    (snapshot.rooms || []).forEach(function (room) {
+      ((room && room.members) || []).forEach(function (member) {
+        var display = String(member.public_name == null ? '' : member.public_name).trim();
+        if (display && names[display]) {
+          issues.push(issue('PUBLIC_FULL_NAME_LEAK', 'room_member', member.public_id, '공개 방배정 표시명이 전체 실명과 동일합니다(성 마스킹 필요).'));
+        }
+      });
+    });
     return issues;
   }
 
@@ -274,7 +289,7 @@ var CampCore = (function () {
     return validateSnapshot_(snapshot, sensitiveValues, 'public', legalNames);
   }
 
-  // 내부 스냅샷(internal-snapshot/v1) 검증. 공개 v2 구조 + member.full_name + 최상위 teachers[]/staff[].
+  // 내부 스냅샷(internal-snapshot/v1·v2) 검증. 공개 v2/v3 구조 + member.full_name + 최상위 teachers[]/staff[]. v2는 rooms[]에 full_name 허용.
   function validateInternalSnapshot(snapshot, sensitiveValues) {
     return validateSnapshot_(snapshot, sensitiveValues, 'internal', []);
   }
@@ -285,19 +300,22 @@ var CampCore = (function () {
     if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) return [issue('PUBLIC_SCHEMA_INVALID', 'snapshot', '', '스냅샷이 객체가 아닙니다.')];
     var version = snapshot.schema_version;
     var isPublicV2 = !isInternal && version === 'public-snapshot/v2';
+    var isPublicV3 = !isInternal && version === 'public-snapshot/v3';
+    var isInternalV2 = isInternal && version === 'internal-snapshot/v2';
     var rootAllowed = isInternal ? ALLOWED.root.concat(ALLOWED.rootInternal) : ALLOWED.root;
     var memberAllowed = isInternal ? ALLOWED.member.concat(ALLOWED.memberInternal) : ALLOWED.member;
 
     unknownKeys(snapshot, rootAllowed).forEach(function (key) { issues.push(issue('PUBLIC_FIELD_NOT_ALLOWED', 'snapshot', key, '허용되지 않은 최상위 키입니다.')); });
 
     var requiredRoot = ['schema_version', 'event', 'generated_at', 'updated_at', 'publish_id', 'notices', 'groups', 'vehicles', 'trips', 'unassigned_summary', 'validation'];
-    if (isPublicV2 || isInternal) requiredRoot = requiredRoot.concat('time_slots'); // v2/내부는 세션 정의 필수
+    if (isPublicV2 || isPublicV3 || isInternal) requiredRoot = requiredRoot.concat('time_slots'); // v2 이상/내부는 세션 정의 필수
+    if (isPublicV3 || isInternalV2) requiredRoot = requiredRoot.concat('rooms'); // v3/내부v2는 방배정 필수
     if (isInternal) requiredRoot = requiredRoot.concat(['teachers', 'staff']);
     requiredRoot.forEach(function (key) {
       if (snapshot[key] == null) issues.push(issue('PUBLIC_REQUIRED_FIELD_MISSING', 'snapshot', key, '필수 스냅샷 필드가 없습니다.'));
     });
 
-    var versionOk = isInternal ? version === INTERNAL_SCHEMA_VERSION : PUBLIC_SCHEMA_VERSIONS.indexOf(version) >= 0;
+    var versionOk = isInternal ? INTERNAL_SCHEMA_VERSIONS.indexOf(version) >= 0 : PUBLIC_SCHEMA_VERSIONS.indexOf(version) >= 0;
     if (!versionOk) issues.push(issue('PUBLIC_SCHEMA_VERSION_INVALID', 'snapshot', 'schema_version', '지원하지 않는 스키마 버전입니다.'));
     if (snapshot.event) unknownKeys(snapshot.event, ALLOWED.event).forEach(function (key) { issues.push(issue('PUBLIC_FIELD_NOT_ALLOWED', 'event', key)); });
     var arrays = ['notices', 'groups', 'vehicles', 'trips', 'unassigned_summary'];
@@ -353,6 +371,34 @@ var CampCore = (function () {
           unknownKeys(person, ALLOWED.personDirectory).forEach(function (col) { issues.push(issue('PUBLIC_FIELD_NOT_ALLOWED', key, col)); });
         });
       });
+    }
+
+    // ── rooms[] (v3 공개 / v2 내부 신규 최상위) ──
+    // 공개 뷰는 성 마스킹 표시명, 내부 뷰는 full_name 추가 허용. occupancy는 members 수와 일치해야 한다.
+    var expectRooms = isPublicV3 || isInternalV2 || snapshot.rooms != null;
+    if (expectRooms) {
+      if (!Array.isArray(snapshot.rooms)) {
+        issues.push(issue('PUBLIC_ARRAY_REQUIRED', 'snapshot', 'rooms'));
+      } else {
+        var roomIds = {};
+        var roomMemberAllowed = isInternal ? ALLOWED.roomMember.concat(ALLOWED.roomMemberInternal) : ALLOWED.roomMember;
+        snapshot.rooms.forEach(function (room) {
+          unknownKeys(room, ALLOWED.room).forEach(function (key) { issues.push(issue('PUBLIC_FIELD_NOT_ALLOWED', 'room', key)); });
+          if (room && roomIds[room.room_id]) issues.push(issue('PUBLIC_DUPLICATE_ID', 'room', room.room_id));
+          if (room) roomIds[room.room_id] = true;
+          if (GENDER_SCOPES.indexOf(String(room && room.gender_scope)) < 0) issues.push(issue('PUBLIC_ENUM_INVALID', 'room', room && room.room_id, 'gender_scope 값이 올바르지 않습니다.'));
+          var roomMembers = (room && room.members) || [];
+          if (room && room.members != null && !Array.isArray(room.members)) {
+            issues.push(issue('PUBLIC_ARRAY_REQUIRED', 'room', room.room_id));
+            roomMembers = [];
+          }
+          if (number(room && room.occupancy, -1) !== roomMembers.length) issues.push(issue('PUBLIC_OCCUPANCY_MISMATCH', 'room', room && room.room_id, 'occupancy가 실제 인원 수와 다릅니다.'));
+          roomMembers.forEach(function (member) {
+            unknownKeys(member, roomMemberAllowed).forEach(function (key) { issues.push(issue('PUBLIC_FIELD_NOT_ALLOWED', 'room_member', key)); });
+            if (member.person_type != null && ROOM_PERSON_TYPES.indexOf(String(member.person_type)) < 0) issues.push(issue('PUBLIC_ENUM_INVALID', 'room_member', member.public_id, 'person_type 값이 올바르지 않습니다.'));
+          });
+        });
+      }
     }
 
     var vehicleIds = {};
@@ -412,6 +458,85 @@ var CampCore = (function () {
 
   function blockingIssues(issues) {
     return (issues || []).filter(function (row) { return row.blocking !== false; });
+  }
+
+  // ── 방배정(Room) 검증 순수 로직 ────────────────────────────────────────
+  // 방 정보·배정은 운영자가 시트에서 수동 입력하고, 여기서는 정원·성별·중복·참조·미배정만 판정한다.
+  // 성별을 판정할 수 없으면(빈 값 등) male/female 방 제약은 위반으로 보지 않는다(오탐 방지).
+  function normalizeGender_(value) {
+    var v = String(value == null ? '' : value).trim().toLowerCase();
+    if (['male', 'm', '남', '남자', 'man', 'boy', '형제'].indexOf(v) >= 0) return 'male';
+    if (['female', 'f', '여', '여자', 'woman', 'girl', '자매'].indexOf(v) >= 0) return 'female';
+    return '';
+  }
+
+  function validateRoomAssignments(rooms, assignments, participants) {
+    var issues = [];
+    var roomIndex = indexBy(rooms, 'room_id');
+    var participantIndex = indexBy(participants, 'participant_id');
+    var assignmentList = assignments || [];
+
+    var byRoom = {};       // 방별 유효 배정 목록(정원 계산)
+    var byParticipant = {}; // 참가자별 배정된 방 목록(중복·미배정 계산)
+
+    assignmentList.forEach(function (row) {
+      var roomId = String(row.room_id == null ? '' : row.room_id);
+      var participantId = String(row.participant_id == null ? '' : row.participant_id);
+      var room = roomIndex[roomId];
+      var participant = participantIndex[participantId];
+      if (!room || !participant) {
+        issues.push(issue('ROOM_UNKNOWN_REF', 'room_assignment', roomId + '|' + participantId, '방 배정이 존재하지 않는 방 또는 참가자를 참조합니다.'));
+        return; // 참조가 깨지면 이후 검사는 의미가 없으므로 건너뛴다.
+      }
+      (byRoom[roomId] = byRoom[roomId] || []).push(participant);
+      (byParticipant[participantId] = byParticipant[participantId] || []).push(roomId);
+
+      if (!activeRow(room)) {
+        issues.push(issue('ROOM_INACTIVE_TARGET', 'room_assignment', roomId + '|' + participantId, '비활성 방에 배정되었습니다.', false, 'warning'));
+      }
+      var scope = String(room.gender_scope == null ? '' : room.gender_scope).trim().toLowerCase();
+      if (scope === 'male' || scope === 'female') {
+        var gender = normalizeGender_(participant.gender);
+        if (gender && gender !== scope) {
+          issues.push(issue('ROOM_GENDER_MISMATCH', 'room_assignment', roomId + '|' + participantId, '방 성별 제약과 참가자 성별이 다릅니다.'));
+        }
+      }
+    });
+
+    // 중복 배정: 한 참가자가 두 건 이상 배정(같은 방 중복 포함).
+    Object.keys(byParticipant).forEach(function (participantId) {
+      if (byParticipant[participantId].length > 1) {
+        issues.push(issue('ROOM_DUPLICATE_ASSIGNMENT', 'participant', participantId, '한 참가자가 두 개 이상의 방(또는 중복)에 배정되었습니다.'));
+      }
+    });
+
+    // 정원 초과: 방 배정 인원 > capacity.
+    Object.keys(byRoom).forEach(function (roomId) {
+      var room = roomIndex[roomId];
+      var capacity = number(room.capacity, Infinity);
+      if (byRoom[roomId].length > capacity) {
+        issues.push(issue('ROOM_OVER_CAPACITY', 'room', roomId, '방 정원을 초과했습니다.'));
+      }
+    });
+
+    // 미배정: active 참가자가 어떤 방에도 배정되지 않음(경고).
+    (participants || []).filter(activeRow).forEach(function (participant) {
+      var pid = String(participant.participant_id);
+      if (!byParticipant[pid] || !byParticipant[pid].length) {
+        issues.push(issue('ROOM_UNASSIGNED', 'participant', pid, '방에 배정되지 않은 활성 참가자입니다.', false, 'warning'));
+      }
+    });
+
+    var blocking = blockingIssues(issues).length;
+    return {
+      issues: issues,
+      summary: {
+        rooms: (rooms || []).length,
+        assignments: assignmentList.length,
+        blocking: blocking,
+        warning: issues.length - blocking
+      }
+    };
   }
 
   function findBundleRelationConflicts(participants, relations) {
@@ -981,6 +1106,7 @@ var CampCore = (function () {
     validateInternalModel: validateInternalModel,
     validatePublicSnapshot: validatePublicSnapshot,
     validateInternalSnapshot: validateInternalSnapshot,
+    validateRoomAssignments: validateRoomAssignments,
     assertNoFullNames: assertNoFullNames,
     blockingIssues: blockingIssues,
     findBundleRelationConflicts: findBundleRelationConflicts,

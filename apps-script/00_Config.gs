@@ -3,8 +3,10 @@
  * 이 프로젝트에는 Spreadsheet ID, URL, 개인 식별값을 하드코딩하지 않는다.
  */
 var CAMP = Object.freeze({
-  SCHEMA_VERSION: 'public-snapshot/v2',
-  INTERNAL_SCHEMA_VERSION: 'internal-snapshot/v1',
+  // Phase 2: 방배정(rooms[]) 추가로 공개 v3 / 내부 v2로 bump.
+  // publisher(06_PublicApi.gs)가 이 값으로 스냅샷을 스탬프하므로, rooms[]·time_slots[]를 반드시 함께 조립해야 게시 검증을 통과한다.
+  SCHEMA_VERSION: 'public-snapshot/v3',
+  INTERNAL_SCHEMA_VERSION: 'internal-snapshot/v2',
   TIMEZONE: 'Asia/Seoul',
   PUBLIC_EXPORT_CHUNK_SIZE: 40000,
   SHEETS: Object.freeze({
@@ -20,6 +22,8 @@ var CAMP = Object.freeze({
     RELATIONS: 'Relations',
     GROUPS: 'Groups',
     GROUP_ASSIGNMENTS: 'Group_Assignments',
+    ROOMS: 'Rooms',
+    ROOM_ASSIGNMENTS: 'Room_Assignments',
     LOCATIONS: 'Locations',
     TRAVEL_DEMANDS: 'Travel_Demands',
     VEHICLES: 'Vehicles',
@@ -46,6 +50,10 @@ var CAMP = Object.freeze({
     Relations: ['relation_id', 'participant_a_id', 'participant_b_id', 'relation_type', 'weight', 'reason_private', 'active'],
     Groups: ['group_id', 'event_id', 'display_name', 'color', 'target_size', 'min_size', 'max_size', 'active'],
     Group_Assignments: ['assignment_id', 'participant_id', 'group_id', 'role', 'locked', 'assignment_source', 'score_delta', 'reason_codes', 'revision', 'updated_at', 'updated_by'],
+    // Phase 2 방배정: 방 정보는 운영자가 시트에서 수동 관리한다. gender_scope ∈ male|female|mixed, capacity=정수 정원.
+    Rooms: ['room_id', 'event_id', 'display_name', 'capacity', 'floor', 'gender_scope', 'active', 'private_note'],
+    // 방 배정도 운영자 수동 입력. assignment_source 기본 manual, locked=재배정 보호.
+    Room_Assignments: ['room_id', 'participant_id', 'locked', 'assignment_source'],
     Locations: ['location_id', 'internal_name', 'public_label', 'area', 'full_address_private', 'public_allowed'],
     Travel_Demands: ['demand_id', 'participant_id', 'direction', 'earliest_depart_at', 'latest_depart_at', 'origin_location_id', 'destination_location_id', 'party_size', 'demand_status', 'locked_trip_id', 'priority', 'private_note'],
     Vehicles: ['vehicle_id', 'event_id', 'internal_label', 'public_label', 'capacity_total', 'accessible', 'route_scope', 'active', 'private_note'],
@@ -63,6 +71,7 @@ var CAMP = Object.freeze({
     EVENT_START_DATE: '',
     EVENT_END_DATE: '',
     GROUP_COUNT: '6',
+    ROOM_COUNT: '8',
     RAW_STUDENT_SHEET: 'Form_Raw_Students',
     RAW_STAFF_SHEET: 'Form_Raw_Staff',
     LAST_SYNC_ROW_STUDENTS: '1',
