@@ -5,6 +5,8 @@ function onOpen() {
     .addItem('1. 운영 시트 초기화', 'initializeCampWorkbook')
     .addSeparator()
     .addItem('2. Form 응답 증분 동기화', 'syncFormResponsesIncremental')
+    .addItem('2-1. 명단 파일 가져오기(미리보기)', 'importRosterPreview')
+    .addItem('2-2. 명단 가져오기 반영', 'importRosterCommit')
     .addItem('3. 조편성 제안', 'proposeGroupAssignments')
     .addItem('4. 차량 수요 배정', 'assignVehicleDemands')
     .addSeparator()

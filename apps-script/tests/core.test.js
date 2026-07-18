@@ -110,4 +110,108 @@ function transactionResult(failPhase) {
 ['stage', 'read', 'corrupt', 'switch'].forEach((phase) => assert.strictEqual(transactionResult(phase), 'pub-old', phase + ' failure must preserve old pointer'));
 assert.strictEqual(transactionResult('none'), 'pub-new');
 
+// ── 명단 가져오기(Roster Import) 순수 로직 테스트 ──────────────────────────
+const rosterMap = [
+  { normalized_field: 'legal_name', required: true },
+  { normalized_field: 'person_type', required: false },
+  { normalized_field: 'campus', required: true },
+  { normalized_field: 'grade_band', required: false },
+  { normalized_field: 'engagement_score', required: false },
+  { normalized_field: 'phone', required: false }
+];
+function existingOne() {
+  return [{ _row: 2, participant_id: 'pt_1', person_type: 'student', legal_name: '김하늘', campus: 'imd', grade_band: '', gender: '', engagement_score: 5, newcomer: '', leader_candidate: '', public_id: 'P-AAAA11', public_name: '', public_consent: false, active: true, source_response_id: 'Form_Raw_Students:2' }];
+}
+
+// 신규 insert: public_consent FALSE, public_name '', 앵커 source_response_id 확인
+const rosterInsert = Core.planRosterUpsert([], [], [
+  { index: 2, fields: { legal_name: '이바다', person_type: 'student', campus: 'suwan' } }
+], rosterMap, { mode: 'commit', eventId: '2026-summer' });
+assert.strictEqual(rosterInsert.summary.insert, 1);
+assert.strictEqual(rosterInsert.inserts[0].participant.public_consent, false);
+assert.strictEqual(rosterInsert.inserts[0].participant.public_name, '');
+assert.strictEqual(rosterInsert.inserts[0].participant.active, true);
+assert.strictEqual(rosterInsert.inserts[0].participant.source_response_id, 'roster_import:이바다|student|suwan');
+
+// 재실행 idempotent: 앵커가 있으면 insert 0, 변경 없으면 update 0
+const anchored = [{ _row: 2, participant_id: 'pt_9', person_type: 'student', legal_name: '이바다', campus: 'suwan', grade_band: '', gender: '', engagement_score: 3, public_id: 'P-Z', public_name: '', public_consent: false, active: true, source_response_id: 'roster_import:이바다|student|suwan' }];
+const rosterIdem = Core.planRosterUpsert(anchored, [], [{ index: 2, fields: { legal_name: '이바다', person_type: 'student', campus: 'suwan' } }], rosterMap, { mode: 'commit', eventId: '2026-summer' });
+assert.strictEqual(rosterIdem.summary.insert, 0);
+assert.strictEqual(rosterIdem.summary.update, 0);
+
+// 빈 칸 채움
+const rosterFill = Core.planRosterUpsert(existingOne(), [], [{ index: 2, fields: { legal_name: '김하늘', person_type: 'student', campus: 'imd', grade_band: 'middle_2' } }], rosterMap, { mode: 'commit', eventId: 'e' });
+assert.strictEqual(rosterFill.summary.update, 1);
+assert.strictEqual(rosterFill.updates[0].setParticipant.grade_band, 'middle_2');
+
+// 충돌 보존(commit) vs 덮어쓰기(commit-overwrite)
+const conflictRows = [{ index: 2, fields: { legal_name: '김하늘', person_type: 'student', campus: 'imd', engagement_score: 3 } }];
+const rosterConflict = Core.planRosterUpsert(existingOne(), [], conflictRows, rosterMap, { mode: 'commit', eventId: 'e' });
+assert.ok(ruleCodes(rosterConflict.issues).includes('ROSTER_FIELD_CONFLICT'));
+assert.strictEqual(rosterConflict.summary.update, 0);
+const rosterOverwrite = Core.planRosterUpsert(existingOne(), [], conflictRows, rosterMap, { mode: 'commit-overwrite', eventId: 'e' });
+assert.strictEqual(rosterOverwrite.updates[0].setParticipant.engagement_score, 3);
+
+// 동명이인 병합 금지
+const twins = [
+  { _row: 2, participant_id: 'pt_a', person_type: 'student', legal_name: '박별', campus: 'imd', active: true, source_response_id: 'Form_Raw_Students:2' },
+  { _row: 3, participant_id: 'pt_b', person_type: 'student', legal_name: '박별', campus: 'imd', active: true, source_response_id: 'Form_Raw_Students:3' }
+];
+const rosterAmbiguous = Core.planRosterUpsert(twins, [], [{ index: 2, fields: { legal_name: '박별', person_type: 'student', campus: 'imd' } }], rosterMap, { mode: 'commit', eventId: 'e' });
+assert.ok(ruleCodes(rosterAmbiguous.issues).includes('ROSTER_AMBIGUOUS_MATCH'));
+assert.strictEqual(rosterAmbiguous.summary.insert, 0);
+assert.strictEqual(rosterAmbiguous.summary.update, 0);
+
+// 민감정보 라우팅과 Change_Log REDACTED
+const routed = Core.routePrivateFields({ legal_name: 'x', phone: '010-1234-5678', campus: 'imd', birth_date: '2010-01-01' });
+assert.ok(routed.privateFields.phone && routed.privateFields.birth_date);
+assert.strictEqual(routed.participantFields.phone, undefined);
+const rosterPrivate = Core.planRosterUpsert(
+  [{ _row: 2, participant_id: 'pt_1', person_type: 'student', legal_name: '김하늘', campus: 'imd', active: true, source_response_id: 'x' }],
+  [{ _row: 2, participant_id: 'pt_1', phone: '', birth_date: '' }],
+  [{ index: 2, fields: { legal_name: '김하늘', person_type: 'student', campus: 'imd', phone: '010-2222-3333' } }],
+  rosterMap, { mode: 'commit', eventId: 'e' }
+);
+assert.strictEqual(rosterPrivate.updates[0].setPrivate.phone, '010-2222-3333');
+const phoneChange = rosterPrivate.updates[0].changeLog.find((c) => c.field_name === 'phone');
+assert.strictEqual(phoneChange.old_value, '[REDACTED]');
+assert.strictEqual(phoneChange.new_value, '[REDACTED]');
+
+// 민감 필드가 참가자 대상으로 전달되면 차단
+assert.ok(ruleCodes(Core.findRosterPrivateLeak({ phone: 'x', campus: 'imd' })).includes('ROSTER_PRIVATE_FIELD_IN_PUBLIC'));
+assert.deepStrictEqual(Core.findRosterPrivateLeak({ campus: 'imd' }), []);
+
+// 명단 누락 기존 참가자는 보고만, active 미변경
+const rosterMissing = Core.planRosterUpsert(
+  [
+    { _row: 2, participant_id: 'pt_1', person_type: 'student', legal_name: '김하늘', campus: 'imd', active: true, source_response_id: 'x' },
+    { _row: 3, participant_id: 'pt_2', person_type: 'student', legal_name: '이바다', campus: 'suwan', active: true, source_response_id: 'y' }
+  ], [], [{ index: 2, fields: { legal_name: '김하늘', person_type: 'student', campus: 'imd' } }], rosterMap, { mode: 'commit', eventId: 'e' }
+);
+assert.strictEqual(rosterMissing.summary.missing_existing, 1);
+assert.strictEqual(rosterMissing.missingExisting[0].participant_id, 'pt_2');
+
+// 파일 내 중복 / 빈 행 / 필수 누락
+const rosterEdge = Core.planRosterUpsert([], [], [
+  { index: 2, fields: { legal_name: '중복', person_type: 'student', campus: 'imd' } },
+  { index: 3, fields: { legal_name: '중복', person_type: 'student', campus: 'imd' } },
+  { index: 4, fields: { legal_name: '', person_type: '', campus: '' } },
+  { index: 5, fields: { legal_name: '무캠퍼스', person_type: 'student', campus: '' } }
+], rosterMap, { mode: 'commit', eventId: 'e' });
+const edgeCodes = ruleCodes(rosterEdge.issues);
+assert.ok(edgeCodes.includes('ROSTER_DUPLICATE_IN_FILE'));
+assert.ok(edgeCodes.includes('ROSTER_EMPTY_ROW_SKIPPED'));
+assert.ok(edgeCodes.includes('ROSTER_REQUIRED_FIELD_MISSING'));
+assert.strictEqual(rosterEdge.summary.insert, 1);
+
+// 매핑 없음
+assert.ok(ruleCodes(Core.planRosterUpsert([], [], [], [], { mode: 'commit' }).issues).includes('ROSTER_NO_MAPPING'));
+
+// preview와 commit의 계획 집계 일치
+const equalityRows = [{ index: 2, fields: { legal_name: '김하늘', person_type: 'student', campus: 'imd', grade_band: 'middle_2' } }];
+assert.deepStrictEqual(
+  Core.planRosterUpsert(existingOne(), [], equalityRows, rosterMap, { mode: 'preview', eventId: 'e' }).summary,
+  Core.planRosterUpsert(existingOne(), [], equalityRows, rosterMap, { mode: 'commit', eventId: 'e' }).summary
+);
+
 console.log('Core tests passed');

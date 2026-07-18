@@ -64,6 +64,9 @@ var CAMP = Object.freeze({
     RAW_STAFF_SHEET: 'Form_Raw_Staff',
     LAST_SYNC_ROW_STUDENTS: '1',
     LAST_SYNC_ROW_STAFF: '1',
+    ROSTER_SOURCE_MODE: '',
+    ROSTER_TARGET_TAB: '',
+    ROSTER_MAX_ROWS: '2000',
     PUBLISH_STATUS: 'draft',
     LAST_PUBLISH_ID: ''
   })

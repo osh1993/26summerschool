@@ -367,6 +367,249 @@ var CampCore = (function () {
     });
   }
 
+  // ── 명단 가져오기(Roster Import) 순수 로직 ──────────────────────────────
+  // 소스(엑셀/구글시트) 열기·시트 쓰기는 어댑터가 담당하고, 여기서는 매칭·upsert 계획만 결정한다.
+  var ROSTER_PRIVATE_FIELDS = ['birth_date', 'phone', 'guardian_phone', 'insurance_status', 'private_note'];
+  var ROSTER_PARTICIPANT_FIELDS = ['legal_name', 'person_type', 'campus', 'grade_band', 'gender', 'engagement_score', 'newcomer', 'leader_candidate'];
+  var ROSTER_MANAGED_FIELDS = ['campus', 'grade_band', 'gender', 'engagement_score', 'newcomer', 'leader_candidate']; // update로 조건부 변경 가능(legal_name/person_type는 매칭 키라 불변)
+  var ROSTER_BOOL_FIELDS = ['newcomer', 'leader_candidate'];
+
+  function isBlank_(value) {
+    return value == null || String(value).trim() === '';
+  }
+
+  function normalizeRosterName(name) {
+    var text = String(name == null ? '' : name);
+    if (typeof text.normalize === 'function') text = text.normalize('NFC');
+    return text.trim().replace(/\s+/g, ' ').toLowerCase();
+  }
+
+  // 명단에는 source_response_id가 없으므로 이름+구분+캠퍼스로 안정적 매칭 키를 만든다.
+  function normalizeRosterKey(name, personType, campus) {
+    return normalizeRosterName(name) + '|' + String(personType == null ? '' : personType).trim() + '|' + String(campus == null ? '' : campus).trim();
+  }
+
+  // 민감 필드는 구조적으로 Participant_Private로만 라우팅해 공개 후보 테이블 유입을 원천 차단한다.
+  function routePrivateFields(row) {
+    row = row || {};
+    var participantFields = {}, privateFields = {};
+    Object.keys(row).forEach(function (key) {
+      if (key === 'free_text') return; // 아래에서 private_note로 흡수
+      if (ROSTER_PRIVATE_FIELDS.indexOf(key) >= 0) privateFields[key] = row[key];
+      else if (ROSTER_PARTICIPANT_FIELDS.indexOf(key) >= 0) participantFields[key] = row[key];
+      // 매핑되지 않은 자유 헤더는 무시한다.
+    });
+    if (!isBlank_(row.free_text) && isBlank_(privateFields.private_note)) privateFields.private_note = row.free_text;
+    return { participantFields: participantFields, privateFields: privateFields };
+  }
+
+  // 방어적 불변조건: 민감 필드가 참가자(공개 후보) 대상으로 전달되면 차단한다.
+  function findRosterPrivateLeak(participantFields) {
+    var leaks = [];
+    Object.keys(participantFields || {}).forEach(function (key) {
+      if (ROSTER_PRIVATE_FIELDS.indexOf(key) >= 0 || key === 'free_text') {
+        leaks.push(issue('ROSTER_PRIVATE_FIELD_IN_PUBLIC', 'participant', key, '민감 필드가 공개 후보 테이블 대상으로 전달되었습니다.'));
+      }
+    });
+    return leaks;
+  }
+
+  function rosterKeyOfParticipant_(participant) {
+    return normalizeRosterKey(participant.legal_name, participant.person_type, participant.campus);
+  }
+
+  function buildRosterInsert_(key, routed, eventId) {
+    var pf = routed.participantFields;
+    return {
+      key: key,
+      participant: {
+        participant_id: null, // 어댑터가 UUID 발급
+        event_id: eventId || '',
+        person_type: isBlank_(pf.person_type) ? 'student' : pf.person_type,
+        legal_name: isBlank_(pf.legal_name) ? '' : pf.legal_name,
+        public_id: null, // 어댑터가 행사별 난수 발급
+        public_name: '', // 운영자 승인 전용
+        public_consent: false, // 자동 TRUE 금지
+        campus: isBlank_(pf.campus) ? '' : pf.campus,
+        grade_band: isBlank_(pf.grade_band) ? '' : pf.grade_band,
+        gender: isBlank_(pf.gender) ? '' : pf.gender,
+        engagement_score: isBlank_(pf.engagement_score) ? 3 : pf.engagement_score,
+        newcomer: bool(pf.newcomer),
+        leader_candidate: bool(pf.leader_candidate),
+        active: true,
+        source_response_id: 'roster_import:' + key, // 재실행 idempotent 앵커
+        updated_at: null // 어댑터가 기록
+      },
+      private: buildRosterPrivate_(routed.privateFields)
+    };
+  }
+
+  function buildRosterPrivate_(pv) {
+    pv = pv || {};
+    var out = {};
+    ROSTER_PRIVATE_FIELDS.forEach(function (field) { if (!isBlank_(pv[field])) out[field] = pv[field]; });
+    return out;
+  }
+
+  function buildRosterUpdate_(target, targetPrivate, routed, mode) {
+    targetPrivate = targetPrivate || {};
+    var setParticipant = {}, setPrivate = {}, changeLog = [], conflicts = [];
+
+    ROSTER_MANAGED_FIELDS.forEach(function (field) {
+      applyRosterField_(field, target[field], routed.participantFields[field], false, ROSTER_BOOL_FIELDS.indexOf(field) >= 0);
+    });
+    ROSTER_PRIVATE_FIELDS.forEach(function (field) {
+      applyRosterField_(field, targetPrivate[field], routed.privateFields[field], true, false);
+    });
+
+    return {
+      participant_id: target.participant_id,
+      row: target._row,
+      private_row: targetPrivate._row || null,
+      setParticipant: setParticipant,
+      setPrivate: setPrivate,
+      changeLog: changeLog,
+      conflicts: conflicts,
+      changed: Object.keys(setParticipant).length > 0 || Object.keys(setPrivate).length > 0
+    };
+
+    function applyRosterField_(field, oldValue, newValue, isPrivate, isBool) {
+      if (isBlank_(newValue)) return; // 빈 명단 값으로 기존 값을 지우지 않는다.
+      var destination = isPrivate ? setPrivate : setParticipant;
+      var same = isBool ? (bool(oldValue) === bool(newValue)) : (String(oldValue == null ? '' : oldValue) === String(newValue));
+      if (isBlank_(oldValue)) {
+        destination[field] = newValue; // 빈 칸 채움
+        changeLog.push(rosterChange_(isPrivate, field, oldValue, newValue, 'roster fill'));
+      } else if (!same) {
+        if (mode === 'commit-overwrite') {
+          destination[field] = newValue;
+          changeLog.push(rosterChange_(isPrivate, field, oldValue, newValue, 'roster overwrite'));
+        } else {
+          conflicts.push({ field: field }); // 기본 commit: 보존하고 보고만
+        }
+      }
+    }
+  }
+
+  function rosterChange_(isPrivate, field, oldValue, newValue, reason) {
+    return {
+      entity_type: isPrivate ? 'participant_private' : 'participant',
+      field_name: field,
+      old_value: isPrivate ? '[REDACTED]' : (oldValue == null ? '' : oldValue), // 민감값 원문은 Change_Log에 남기지 않는다.
+      new_value: isPrivate ? '[REDACTED]' : newValue,
+      reason: reason
+    };
+  }
+
+  function planRosterUpsert(existingParticipants, existingPrivate, rosterRows, mappings, options) {
+    options = options || {};
+    var mode = options.mode || 'preview';
+    var eventId = options.eventId || '';
+    var maxRows = number(options.maxRows, 2000);
+    var issues = [];
+    var inserts = [], updates = [], conflicts = [], ambiguous = [], skipped = [], missingExisting = [];
+
+    var activeMappings = (mappings || []).filter(function (m) { return m && !isBlank_(m.normalized_field); });
+    if (!activeMappings.length) {
+      issues.push(issue('ROSTER_NO_MAPPING', 'import', '', 'Roster_Import 활성 매핑이 없습니다.'));
+      return summarize_();
+    }
+    var requiredFields = activeMappings.filter(function (m) { return bool(m.required); }).map(function (m) { return String(m.normalized_field).trim(); });
+
+    var privById = indexBy(existingPrivate, 'participant_id');
+    var bySource = {};
+    (existingParticipants || []).forEach(function (p) { if (!isBlank_(p.source_response_id)) bySource[String(p.source_response_id)] = p; });
+    var byKeyActive = {};
+    (existingParticipants || []).forEach(function (p) {
+      if (!activeRow(p)) return;
+      var key = rosterKeyOfParticipant_(p);
+      (byKeyActive[key] = byKeyActive[key] || []).push(p);
+    });
+
+    var totalRows = (rosterRows || []).length;
+    if (totalRows > maxRows) {
+      issues.push(issue('ROSTER_TOO_MANY_ROWS', 'import', '', '명단 행이 상한(' + maxRows + ')을 초과했습니다. 상한까지만 처리합니다.', false, 'warning'));
+    }
+    var rows = (rosterRows || []).slice(0, maxRows);
+
+    var seenKeys = {};
+    var matchedExisting = {};
+
+    rows.forEach(function (entry) {
+      var index = entry && entry.index != null ? entry.index : '';
+      var fields = (entry && entry.fields) || {};
+      var keys = Object.keys(fields);
+      if (!keys.length || keys.every(function (k) { return isBlank_(fields[k]); })) {
+        skipped.push({ index: index, reason: 'ROSTER_EMPTY_ROW_SKIPPED' });
+        issues.push(issue('ROSTER_EMPTY_ROW_SKIPPED', 'roster_row', index, '빈 행을 건너뜁니다.', false, 'warning'));
+        return;
+      }
+      var missing = requiredFields.filter(function (f) { return isBlank_(fields[f]); });
+      if (missing.length) {
+        skipped.push({ index: index, reason: 'ROSTER_REQUIRED_FIELD_MISSING' });
+        issues.push(issue('ROSTER_REQUIRED_FIELD_MISSING', 'roster_row', index, '필수 필드 누락: ' + missing.join(',')));
+        return;
+      }
+      var key = normalizeRosterKey(fields.legal_name, isBlank_(fields.person_type) ? 'student' : fields.person_type, fields.campus);
+      if (seenKeys[key]) {
+        skipped.push({ index: index, reason: 'ROSTER_DUPLICATE_IN_FILE' });
+        issues.push(issue('ROSTER_DUPLICATE_IN_FILE', 'roster_row', index, '파일 내 중복 행을 건너뜁니다.', false, 'warning'));
+        return;
+      }
+      seenKeys[key] = true;
+
+      var routed = routePrivateFields(fields);
+      var leak = findRosterPrivateLeak(routed.participantFields);
+      if (leak.length) leak.forEach(function (row) { issues.push(row); });
+
+      var target = bySource['roster_import:' + key];
+      if (!target) {
+        var candidates = byKeyActive[key] || [];
+        if (candidates.length > 1) {
+          ambiguous.push({ index: index, key: key, count: candidates.length });
+          issues.push(issue('ROSTER_AMBIGUOUS_MATCH', 'roster_row', index, '동일 매칭 키의 기존 참가자가 여러 명입니다. 병합하지 않고 건너뜁니다.'));
+          return;
+        }
+        target = candidates[0] || null;
+      }
+
+      if (!target) {
+        inserts.push(buildRosterInsert_(key, routed, eventId));
+        return;
+      }
+      matchedExisting[String(target.participant_id)] = true;
+      var update = buildRosterUpdate_(target, privById[String(target.participant_id)], routed, mode);
+      if (update.conflicts.length) {
+        conflicts.push({ index: index, participant_id: target.participant_id, fields: update.conflicts.map(function (c) { return c.field; }) });
+        update.conflicts.forEach(function (c) {
+          issues.push(issue('ROSTER_FIELD_CONFLICT', 'participant', target.participant_id, '기존 값과 다른 명단 값을 보존했습니다: ' + c.field, false, 'warning'));
+        });
+      }
+      if (update.changed) updates.push(update);
+    });
+
+    (existingParticipants || []).forEach(function (p) {
+      if (!activeRow(p)) return;
+      if (!matchedExisting[String(p.participant_id)]) {
+        missingExisting.push({ participant_id: p.participant_id });
+        issues.push(issue('ROSTER_MISSING_EXISTING', 'participant', p.participant_id, '명단에 없는 기존 활성 참가자입니다. 자동 비활성화하지 않습니다.', false, 'warning'));
+      }
+    });
+
+    return summarize_();
+
+    function summarize_() {
+      return {
+        inserts: inserts, updates: updates, conflicts: conflicts, ambiguous: ambiguous,
+        skipped: skipped, missingExisting: missingExisting, issues: issues,
+        summary: {
+          insert: inserts.length, update: updates.length, conflict: conflicts.length,
+          ambiguous: ambiguous.length, skip: skipped.length, missing_existing: missingExisting.length
+        }
+      };
+    }
+  }
+
   return {
     issue: issue,
     bool: bool,
@@ -379,7 +622,11 @@ var CampCore = (function () {
     blockingIssues: blockingIssues,
     findBundleRelationConflicts: findBundleRelationConflicts,
     runPublicationTransaction: runPublicationTransaction,
-    aggregatePublicWarnings: aggregatePublicWarnings
+    aggregatePublicWarnings: aggregatePublicWarnings,
+    normalizeRosterKey: normalizeRosterKey,
+    routePrivateFields: routePrivateFields,
+    findRosterPrivateLeak: findRosterPrivateLeak,
+    planRosterUpsert: planRosterUpsert
   };
 }());
 
