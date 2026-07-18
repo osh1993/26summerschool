@@ -1,14 +1,12 @@
-# Vercel CLI 업로드에서 제외할 항목 (개인정보·원본 자료·하네스 산출물)
-# 배포에는 docs/ 정적 사이트와 검증 게이트(scripts/, tests/, package.json)만 필요하다.
-*.hwp
-*.pdf
-*.xlsx
-*.xls
-reference/
-_workspace/
-.agents/
-.codex/
-.claude/
-.github/
-wiki/
-apps-script/
+# Vercel CLI는 .gitignore를 자동으로 따르지 않으므로, 안전을 위해 전부 제외한 뒤
+# 배포에 꼭 필요한 것만 허용(allowlist)한다.
+# 필요한 것: docs/(정적 사이트=outputDirectory), scripts·tests·package.json(npm run check 게이트),
+#   apps-script/Core.js(검증이 재사용하는 공용 순수 로직), vercel.json
+# 제외되는 것: reference/(51MB 로컬 자료), *.hwp/*.pdf(개인정보 원본), _workspace/, wiki/, .claude/ 등
+/*
+!/docs
+!/scripts
+!/tests
+!/apps-script
+!/package.json
+!/vercel.json
