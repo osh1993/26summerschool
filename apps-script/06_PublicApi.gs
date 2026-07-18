@@ -118,7 +118,7 @@ function buildPersonDirectory_(data, groupIdByParticipant, personType) {
     });
 }
 
-// internal=true면 각 member에 full_name(legal_name)과 최상위 teachers[]/staff[], rooms[].members[].full_name을 덧붙인 internal-snapshot/v2를 만든다.
+// internal=true면 각 member에 full_name(legal_name)과 최상위 teachers[]/staff[], rooms[]·trips[] 탑승자의 full_name을 덧붙인 internal-snapshot/v3를 만든다.
 function buildPublicSnapshot_(data, publishId, preIssues, internal) {
   var participants = CampCore.indexBy(data.participants, 'participant_id');
   var vehicles = CampCore.indexBy(data.vehicles, 'vehicle_id');
@@ -171,7 +171,10 @@ function buildPublicSnapshot_(data, publishId, preIssues, internal) {
       var person = participants[String(row.participant_id)];
       var status = String(row.boarding_status || 'planned');
       if (status === 'no_show') status = 'cancelled';
-      return { public_id: String(person.public_id), public_name: String(person.public_name), boarding_status: status };
+      // Phase 3: 공개 탑승자 표시명은 항상 성 마스킹으로 파생한다(원본 public_name 사용 금지). 내부 뷰에만 full_name(실명) 추가.
+      var passenger = { public_id: String(person.public_id), public_name: CampCore.maskSurname(person.legal_name), boarding_status: status };
+      if (internal) passenger.full_name = String(person.legal_name == null ? '' : person.legal_name);
+      return passenger;
     });
     var departIso = dateToIso_(trip.depart_at);
     var vehicle = vehicles[String(trip.vehicle_id)];
@@ -180,6 +183,8 @@ function buildPublicSnapshot_(data, publishId, preIssues, internal) {
       trip_id: String(trip.trip_id),
       date: departIso.slice(0, 10),
       time: departIso.slice(11, 16),
+      // Phase 3: 공개 표시용 시간 버킷(오전/오후/밤) 파생. 내부 정밀 ISO(depart_at)는 변경하지 않고 date/time과 병행 유지.
+      time_bucket: CampCore.tripTimeBucket(departIso, CAMP.TIMEZONE),
       direction: String(trip.direction),
       origin: String(locations[String(trip.origin_location_id)].public_label),
       destination: String(locations[String(trip.destination_location_id)].public_label),
@@ -234,7 +239,7 @@ function buildPublicSnapshot_(data, publishId, preIssues, internal) {
   });
 }
 
-// 내부 스냅샷(internal-snapshot/v2)을 조립한다. 정적 파일로 저장하지 않고 doPost 응답으로만 반환한다.
+// 내부 스냅샷(internal-snapshot/v3)을 조립한다. 정적 파일로 저장하지 않고 doPost 응답으로만 반환한다.
 function buildInternalSnapshot_(data) {
   var publishId = 'internal-' + Utilities.formatDate(new Date(), CAMP.TIMEZONE, 'yyyyMMdd-HHmmss');
   return buildPublicSnapshot_(data, publishId, [], true);

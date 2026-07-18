@@ -52,14 +52,15 @@ function validatePublishEligibility_(data) {
       issues.push(CampCore.issue('MISSING_PUBLIC_ID', 'participant', row.participant_id, '공개 동의 참가자에게 공개 코드(public_id)가 없습니다.'));
     }
   });
-  // 차량 탑승자: 기존 공개 동의 요건 유지(차량 표현은 Phase 3에서 재검토).
+  // 차량 탑승자: Phase 3부터 공개 표시명은 성 마스킹(maskSurname)으로 자동 파생하므로 public_name 컬럼은 요구하지 않는다.
+  // 다만 탑승자는 공개 뷰에 노출되므로 공개 동의(public_consent)와 공개 코드(public_id)는 여전히 필수다(조편성 규칙과 동일).
   var tripUsed = {};
   (data.tripPassengers || []).filter(function (row) { return ['cancelled', 'no_show'].indexOf(String(row.boarding_status)) < 0; })
     .forEach(function (row) { tripUsed[String(row.participant_id)] = true; });
   Object.keys(tripUsed).forEach(function (id) {
     var participant = participants[id];
-    if (!participant || !CampCore.bool(participant.public_consent) || !String(participant.public_id || '').trim() || !String(participant.public_name || '').trim()) {
-      issues.push(CampCore.issue('MISSING_PUBLIC_CONSENT', 'participant', id, '공개 배정 대상의 동의 또는 승인 게시명이 없습니다.'));
+    if (!participant || !CampCore.bool(participant.public_consent) || !String(participant.public_id || '').trim()) {
+      issues.push(CampCore.issue('MISSING_PUBLIC_CONSENT', 'participant', id, '공개 배정 대상의 동의 또는 공개 코드(public_id)가 없습니다.'));
     }
   });
   (data.trips || []).filter(function (trip) { return ['open', 'confirmed', 'departed', 'arrived', 'cancelled'].indexOf(String(trip.trip_status)) >= 0; }).forEach(function (trip) {

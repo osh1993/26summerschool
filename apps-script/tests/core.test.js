@@ -503,4 +503,78 @@ assert.ok(ruleCodes(Core.validateInternalSnapshot(iv2NoRooms, [])).includes('PUB
 // 공개 검증기는 내부 v2(rooms full_name/teachers)를 거부
 assert.ok(ruleCodes(Core.validatePublicSnapshot(validInternalV2Snapshot(), [])).includes('PUBLIC_FIELD_NOT_ALLOWED'));
 
+// ── 차량 시간 버킷(tripTimeBucket) ───────────────────────────────────────
+// 임계 경계: 00–11 morning, 12–17 afternoon, 18–23 night
+assert.strictEqual(Core.tripTimeBucket('2026-07-23T11:59:00+09:00', 'Asia/Seoul'), 'morning');   // 11:59 → 오전
+assert.strictEqual(Core.tripTimeBucket('2026-07-23T12:00:00+09:00', 'Asia/Seoul'), 'afternoon'); // 12:00 → 오후
+assert.strictEqual(Core.tripTimeBucket('2026-07-23T17:59:00+09:00', 'Asia/Seoul'), 'afternoon'); // 17:59 → 오후
+assert.strictEqual(Core.tripTimeBucket('2026-07-23T18:00:00+09:00', 'Asia/Seoul'), 'night');     // 18:00 → 밤
+assert.strictEqual(Core.tripTimeBucket('2026-07-23T00:00:00+09:00', 'Asia/Seoul'), 'morning');   // 자정 경계
+assert.strictEqual(Core.tripTimeBucket('2026-07-23T23:30:00+09:00', 'Asia/Seoul'), 'night');
+// 오프셋 포함 ISO: 문자열에 적힌 로컬 시각 hour를 그대로 사용(오프셋이 다르면 그 오프셋 기준 벽시계)
+assert.strictEqual(Core.tripTimeBucket('2026-07-23T09:00:00-05:00', 'Asia/Seoul'), 'morning');   // 09시(로컬) → 오전
+assert.strictEqual(Core.tripTimeBucket('2026-07-23T20:00:00+00:00', 'Asia/Seoul'), 'night');     // 20시(로컬) → 밤
+// 오프셋 없는 ISO: timezone(Asia/Seoul) 벽시계로 간주
+assert.strictEqual(Core.tripTimeBucket('2026-07-23T13:30:00', 'Asia/Seoul'), 'afternoon');
+assert.strictEqual(Core.tripTimeBucket('2026-07-23T13:30', 'Asia/Seoul'), 'afternoon');
+// 파싱 불가/빈값 → 빈 버킷
+assert.strictEqual(Core.tripTimeBucket('', 'Asia/Seoul'), '');
+assert.strictEqual(Core.tripTimeBucket('not-a-date', 'Asia/Seoul'), '');
+// 버킷 라벨은 세션과 동일 어휘(오전/오후/밤) 재사용
+assert.strictEqual(Core.sessionPartLabel(Core.tripTimeBucket('2026-07-23T18:00:00+09:00', 'Asia/Seoul')), '밤');
+
+// ── 공개 스냅샷 v4 검증(time_bucket 수용/거부 + 탑승자 마스킹) ────────────
+function validV4Snapshot() {
+  const s = validV3Snapshot();
+  s.schema_version = 'public-snapshot/v4';
+  s.trips[0].time_bucket = 'afternoon'; // 13:30 출발 → 오후
+  return s;
+}
+// v1~v3 하위호환 유지 + v4 정본 통과
+assert.deepStrictEqual(Core.validatePublicSnapshot(validSnapshot(), []), []);
+assert.deepStrictEqual(Core.validatePublicSnapshot(validV2Snapshot(), []), []);
+assert.deepStrictEqual(Core.validatePublicSnapshot(validV3Snapshot(), []), []);
+assert.deepStrictEqual(Core.validatePublicSnapshot(validV4Snapshot(), []), []);
+// v4인데 time_bucket 누락 → 필수 필드 누락
+const v4NoBucket = validV4Snapshot(); delete v4NoBucket.trips[0].time_bucket;
+assert.ok(ruleCodes(Core.validatePublicSnapshot(v4NoBucket, [])).includes('PUBLIC_REQUIRED_FIELD_MISSING'));
+// time_bucket enum 위반
+const v4BadBucket = validV4Snapshot(); v4BadBucket.trips[0].time_bucket = 'evening';
+assert.ok(ruleCodes(Core.validatePublicSnapshot(v4BadBucket, [])).includes('PUBLIC_ENUM_INVALID'));
+// 탑승자 실명 필드(full_name) 공개 유입 거부
+const v4PaxFull = validV4Snapshot(); v4PaxFull.trips[0].passengers[0].full_name = '실명';
+assert.ok(ruleCodes(Core.validatePublicSnapshot(v4PaxFull, [])).includes('PUBLIC_FIELD_NOT_ALLOWED'));
+// 마스킹된 탑승자 표시명은 통과, 전체 실명이 표시명이면 성 마스킹 실패
+const v4PaxMasked = validV4Snapshot(); v4PaxMasked.trips[0].passengers[0].public_name = '김○○';
+assert.deepStrictEqual(Core.validatePublicSnapshot(v4PaxMasked, [], ['홍길동']), []);
+const v4PaxLeak = validV4Snapshot(); v4PaxLeak.trips[0].passengers[0].public_name = '홍길동';
+assert.ok(ruleCodes(Core.validatePublicSnapshot(v4PaxLeak, [], ['홍길동'])).includes('PUBLIC_FULL_NAME_LEAK'));
+assert.deepStrictEqual(ruleCodes(Core.assertNoFullNames(v4PaxLeak, ['홍길동'])), ['PUBLIC_FULL_NAME_LEAK']);
+assert.deepStrictEqual(Core.assertNoFullNames(validV4Snapshot(), ['홍길동']), []); // 마스킹된 탑승자는 통과
+
+// ── 내부 스냅샷 v3 검증(trips passengers full_name 수용) ──────────────────
+function validInternalV3Snapshot() {
+  const s = validV4Snapshot();
+  s.schema_version = 'internal-snapshot/v3';
+  s.groups[0].members[0].full_name = '홍길동';
+  s.groups[0].members[1].full_name = '남궁민수';
+  s.teachers = [{ participant_id: 'pt_t1', full_name: '이선생', campus: '임동', group_id: 'G01' }];
+  s.staff = [{ participant_id: 'pt_s1', full_name: '박스탭', campus: '수완', group_id: null }];
+  s.rooms[0].members[0].full_name = '홍길동';
+  s.trips[0].passengers[0].full_name = '홍길동'; // 내부 차량 뷰는 전체 이름 정상 노출
+  return s;
+}
+assert.deepStrictEqual(Core.validateInternalSnapshot(validInternalV3Snapshot(), []), []);
+// 내부는 탑승자 full_name(실명) 노출이 정상 → 유출/미허용 이슈 없음
+assert.ok(!ruleCodes(Core.validateInternalSnapshot(validInternalV3Snapshot(), [])).includes('PUBLIC_FULL_NAME_LEAK'));
+assert.ok(!ruleCodes(Core.validateInternalSnapshot(validInternalV3Snapshot(), [])).includes('PUBLIC_FIELD_NOT_ALLOWED'));
+// 내부 v1·v2 하위호환 유지
+assert.deepStrictEqual(Core.validateInternalSnapshot(validInternalSnapshot(), []), []);
+assert.deepStrictEqual(Core.validateInternalSnapshot(validInternalV2Snapshot(), []), []);
+// 내부 v3인데 time_bucket 누락 → 필수 필드 누락
+const iv3NoBucket = validInternalV3Snapshot(); delete iv3NoBucket.trips[0].time_bucket;
+assert.ok(ruleCodes(Core.validateInternalSnapshot(iv3NoBucket, [])).includes('PUBLIC_REQUIRED_FIELD_MISSING'));
+// 공개 검증기는 내부 v3(탑승자 full_name/teachers)를 거부
+assert.ok(ruleCodes(Core.validatePublicSnapshot(validInternalV3Snapshot(), [])).includes('PUBLIC_FIELD_NOT_ALLOWED'));
+
 console.log('Core tests passed');

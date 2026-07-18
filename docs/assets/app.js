@@ -1,7 +1,7 @@
 "use strict";
 
-const SUPPORTED_SCHEMAS = ["public-snapshot/v1", "public-snapshot/v2", "public-snapshot/v3"];
-const INTERNAL_SCHEMAS = ["internal-snapshot/v1", "internal-snapshot/v2"];
+const SUPPORTED_SCHEMAS = ["public-snapshot/v1", "public-snapshot/v2", "public-snapshot/v3", "public-snapshot/v4"];
+const INTERNAL_SCHEMAS = ["internal-snapshot/v1", "internal-snapshot/v2", "internal-snapshot/v3"];
 const INTERNAL_SESSION_KEY = "camp.internal.snapshot";
 const FALLBACK_SOURCES = [
   { key: "latest", url: "data/latest.json" },
@@ -14,6 +14,7 @@ const state = {
   trips: {
     date: "all",
     direction: "all",
+    bucket: "all",
     query: ""
   },
   groups: {
@@ -53,6 +54,18 @@ const roleLabels = {
 const directionLabels = {
   IN: "IN · 수련회장으로",
   OUT: "OUT · 광주로"
+};
+
+// 차량 운행 시간 버킷: 색상만으로 구분하지 않고 아이콘+텍스트를 함께 쓴다(오전/오후/밤).
+const tripBucketLabels = {
+  morning: "오전",
+  afternoon: "오후",
+  night: "밤"
+};
+const tripBucketIcons = {
+  morning: "☀",
+  afternoon: "⛅",
+  night: "🌙"
 };
 
 // 방 성별 범위: 색상만으로 구분하지 않고 아이콘+텍스트를 함께 쓴다.
@@ -126,6 +139,7 @@ function activateTab(name) {
 function bindFilters() {
   const dateFilter = document.getElementById("date-filter");
   const directionFilter = document.getElementById("direction-filter");
+  const bucketFilter = document.getElementById("bucket-filter");
   const tripSearch = document.getElementById("trip-search");
   const groupSearch = document.getElementById("group-search");
   const roomSearch = document.getElementById("room-search");
@@ -137,6 +151,11 @@ function bindFilters() {
 
   directionFilter.addEventListener("change", () => {
     state.trips.direction = directionFilter.value;
+    renderTrips();
+  });
+
+  bucketFilter.addEventListener("change", () => {
+    state.trips.bucket = bucketFilter.value;
     renderTrips();
   });
 
@@ -213,12 +232,13 @@ function validateSnapshot(snapshot) {
   });
 
   // v2 이상은 time_slots(세션 정의)가 필수. v1은 없어도 통과(하위호환).
-  const isV2Plus = snapshot.schema_version === "public-snapshot/v2" || snapshot.schema_version === "public-snapshot/v3";
+  const isV2Plus = ["public-snapshot/v2", "public-snapshot/v3", "public-snapshot/v4"].includes(snapshot.schema_version);
   if (isV2Plus && !Array.isArray(snapshot.time_slots)) {
     throw new Error("배열 필드 누락: time_slots");
   }
-  // v3는 rooms(방배정)가 필수. rooms가 있으면 배열이어야 한다.
-  if (snapshot.schema_version === "public-snapshot/v3" && !Array.isArray(snapshot.rooms)) {
+  // v3 이상은 rooms(방배정)가 필수. rooms가 있으면 배열이어야 한다.
+  const isV3Plus = ["public-snapshot/v3", "public-snapshot/v4"].includes(snapshot.schema_version);
+  if (isV3Plus && !Array.isArray(snapshot.rooms)) {
     throw new Error("배열 필드 누락: rooms");
   }
   if (snapshot.rooms != null && !Array.isArray(snapshot.rooms)) {
@@ -233,8 +253,16 @@ function validateSnapshot(snapshot) {
   }
 
   const vehicleIds = new Set(snapshot.vehicles.map((vehicle) => vehicle.vehicle_id));
+  const requireBucket = snapshot.schema_version === "public-snapshot/v4";
   snapshot.trips.forEach((trip) => {
     if (!vehicleIds.has(trip.vehicle_id)) throw new Error(`알 수 없는 차량: ${trip.vehicle_id}`);
+    // v4는 time_bucket(오전/오후/밤)이 필수 파생 필드다. 값이 있으면 enum이어야 한다.
+    if (requireBucket && !tripBucketLabels[trip.time_bucket]) {
+      throw new Error(`시간 버킷 누락/오류: ${trip.trip_id}`);
+    }
+    if (trip.time_bucket != null && !tripBucketLabels[trip.time_bucket]) {
+      throw new Error(`시간 버킷 값 오류: ${trip.trip_id}`);
+    }
     if (!Array.isArray(trip.passengers)) throw new Error(`승객 배열 누락: ${trip.trip_id}`);
     if (Number(trip.passenger_count) !== trip.passengers.length) {
       throw new Error(`승객 수 불일치: ${trip.trip_id}`);
@@ -313,6 +341,7 @@ function renderTrips() {
   const filtered = state.snapshot.trips
     .filter((trip) => state.trips.date === "all" || trip.date === state.trips.date)
     .filter((trip) => state.trips.direction === "all" || trip.direction === state.trips.direction)
+    .filter((trip) => state.trips.bucket === "all" || trip.time_bucket === state.trips.bucket)
     .filter((trip) => matchesTripSearch(trip, state.trips.query))
     .sort(compareTrips);
 
@@ -332,6 +361,10 @@ function createTripCard(trip) {
   direction.dataset.direction = trip.direction;
   direction.textContent = directionLabels[trip.direction] || trip.direction;
   headerText.append(direction);
+
+  // 시간 버킷 배지(오전/오후/밤): 아이콘+텍스트 병행, 색상 단독 금지. 정밀 시각은 아래 제목에서 병행 표시한다.
+  const bucketChip = createBucketChip(trip.time_bucket);
+  if (bucketChip) headerText.append(bucketChip);
 
   const title = element("h3");
   title.id = `trip-title-${safeId(trip.trip_id)}`;
@@ -376,6 +409,18 @@ function createTripCard(trip) {
   body.append(details);
   card.append(header, body);
   return card;
+}
+
+// 시간 버킷 배지(오전/오후/밤). 아이콘+텍스트를 함께 써서 색상만으로 구분하지 않는다. 버킷이 없으면 null.
+function createBucketChip(bucket) {
+  const label = tripBucketLabels[bucket];
+  if (!label) return null;
+  const chip = element("span", "bucket-chip");
+  chip.dataset.bucket = bucket;
+  appendTextElement(chip, "span", tripBucketIcons[bucket] || "", "bucket-icon").setAttribute("aria-hidden", "true");
+  appendTextElement(chip, "span", label, "bucket-text");
+  chip.setAttribute("aria-label", `시간대 ${label}`);
+  return chip;
 }
 
 function timeSlots(snapshot) {
@@ -612,6 +657,7 @@ function matchesTripSearch(trip, query) {
     trip.destination,
     trip.meeting_point,
     trip.driver_label,
+    tripBucketLabels[trip.time_bucket],
     vehicle?.label,
     ...trip.passengers.flatMap((passenger) => [passenger.public_id, passenger.public_name])
   ].join(" ");
@@ -795,6 +841,7 @@ function logoutInternal() {
   state.internal.source = null;
   clearNode(document.getElementById("internal-table-body"));
   clearNode(document.getElementById("internal-room-body"));
+  clearNode(document.getElementById("internal-trip-body"));
   clearNode(document.getElementById("teachers-table-body"));
   clearNode(document.getElementById("staff-table-body"));
   showInternalView(false);
@@ -850,6 +897,7 @@ function renderInternal() {
   });
 
   renderInternalRooms(snapshot);
+  renderInternalTrips(snapshot);
   renderDirectory("teachers-table-body", snapshot.teachers, snapshot.groups);
   renderDirectory("staff-table-body", snapshot.staff, snapshot.groups);
 }
@@ -903,6 +951,47 @@ function renderInternalRooms(snapshot) {
       appendTextElement(row, "td", member.campus || "-");
       body.append(row);
     });
+  });
+}
+
+// 내부(인증) 차량 운행: 탑승자를 전체 이름으로 표시한다. 시간대 배지는 공개 뷰와 동일 어휘(오전/오후/밤).
+function renderInternalTrips(snapshot) {
+  const body = document.getElementById("internal-trip-body");
+  if (!body) return;
+  clearNode(body);
+  const trips = Array.isArray(snapshot.trips) ? [...snapshot.trips].sort(compareTrips) : [];
+  const vehicles = Array.isArray(snapshot.vehicles) ? snapshot.vehicles : [];
+
+  if (!trips.length) {
+    const row = document.createElement("tr");
+    const cell = document.createElement("td");
+    cell.colSpan = 5;
+    cell.className = "empty-cell";
+    cell.textContent = "등록된 차량 운행이 없습니다.";
+    row.append(cell);
+    body.append(row);
+    return;
+  }
+
+  trips.forEach((trip) => {
+    const row = document.createElement("tr");
+    appendTextElement(row, "td", `${formatDate(trip.date, true)} ${trip.time}`);
+
+    const bucketCell = document.createElement("td");
+    const chip = createBucketChip(trip.time_bucket);
+    if (chip) bucketCell.append(chip); else bucketCell.textContent = "-";
+    row.append(bucketCell);
+
+    appendTextElement(row, "td", directionLabels[trip.direction] || trip.direction);
+    const vehicle = vehicles.find((item) => item.vehicle_id === trip.vehicle_id);
+    appendTextElement(row, "td", vehicle?.label || trip.vehicle_id);
+
+    // 내부 뷰는 전체 이름(full_name)을 우선 표시하고, 없으면 마스킹 표시명으로 폴백한다.
+    const names = (trip.passengers || [])
+      .map((passenger) => passenger.full_name || passenger.public_name || passenger.public_id)
+      .join(", ");
+    appendTextElement(row, "td", names || "탑승자 없음", "full-name");
+    body.append(row);
   });
 }
 
