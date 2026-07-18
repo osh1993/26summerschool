@@ -3,7 +3,8 @@
  * 이 프로젝트에는 Spreadsheet ID, URL, 개인 식별값을 하드코딩하지 않는다.
  */
 var CAMP = Object.freeze({
-  SCHEMA_VERSION: 'public-snapshot/v1',
+  SCHEMA_VERSION: 'public-snapshot/v2',
+  INTERNAL_SCHEMA_VERSION: 'internal-snapshot/v1',
   TIMEZONE: 'Asia/Seoul',
   PUBLIC_EXPORT_CHUNK_SIZE: 40000,
   SHEETS: Object.freeze({
@@ -36,9 +37,11 @@ var CAMP = Object.freeze({
     Form_Field_Map: ['source_sheet', 'source_header', 'normalized_field', 'required', 'active'],
     Form_Raw_Students: [],
     Form_Raw_Staff: [],
-    Participants: ['participant_id', 'event_id', 'person_type', 'legal_name', 'public_id', 'public_name', 'public_consent', 'campus', 'grade_band', 'gender', 'engagement_score', 'newcomer', 'leader_candidate', 'active', 'source_response_id', 'updated_at'],
+    // extraversion_score(외향성 1~5, 기본 3)는 기존 시트 마이그레이션 안전성을 위해 후행 컬럼으로 append 한다.
+    Participants: ['participant_id', 'event_id', 'person_type', 'legal_name', 'public_id', 'public_name', 'public_consent', 'campus', 'grade_band', 'gender', 'engagement_score', 'newcomer', 'leader_candidate', 'active', 'source_response_id', 'updated_at', 'extraversion_score'],
     Participant_Private: ['participant_id', 'birth_date', 'phone', 'guardian_phone', 'insurance_status', 'private_note'],
-    Time_Slots: ['slot_id', 'event_id', 'label', 'starts_at', 'ends_at', 'core_program'],
+    // day_index(1~3)/part(morning/afternoon/night)는 세션 표시용 후행 컬럼으로 append 한다.
+    Time_Slots: ['slot_id', 'event_id', 'label', 'starts_at', 'ends_at', 'core_program', 'day_index', 'part'],
     Attendance: ['attendance_id', 'participant_id', 'slot_id', 'presence_status', 'locked'],
     Relations: ['relation_id', 'participant_a_id', 'participant_b_id', 'relation_type', 'weight', 'reason_private', 'active'],
     Groups: ['group_id', 'event_id', 'display_name', 'color', 'target_size', 'min_size', 'max_size', 'active'],

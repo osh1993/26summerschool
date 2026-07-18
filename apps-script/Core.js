@@ -196,11 +196,17 @@ var CampCore = (function () {
   }
 
   var ALLOWED = Object.freeze({
-    root: ['schema_version', 'event', 'generated_at', 'updated_at', 'publish_id', 'notices', 'groups', 'vehicles', 'trips', 'unassigned_summary', 'validation'],
+    // v1 최상위 + v2 신규 time_slots. teachers/staff는 내부 스냅샷에서만 추가 허용.
+    root: ['schema_version', 'event', 'generated_at', 'updated_at', 'publish_id', 'notices', 'groups', 'vehicles', 'trips', 'unassigned_summary', 'validation', 'time_slots'],
+    rootInternal: ['teachers', 'staff'],
     event: ['event_id', 'name', 'starts_on', 'ends_on', 'timezone'],
     notice: ['notice_id', 'title', 'message', 'severity', 'starts_at', 'ends_at'],
     group: ['group_id', 'display_name', 'color', 'members'],
-    member: ['public_id', 'public_name', 'role'],
+    // v2: campus/session_slots 추가. full_name은 내부 스냅샷에서만 추가 허용.
+    member: ['public_id', 'public_name', 'role', 'campus', 'session_slots'],
+    memberInternal: ['full_name'],
+    timeSlot: ['slot_id', 'label', 'day_index', 'part'],
+    personDirectory: ['participant_id', 'full_name', 'campus', 'group_id'],
     vehicle: ['vehicle_id', 'label', 'capacity', 'accessibility'],
     trip: ['trip_id', 'date', 'time', 'direction', 'origin', 'destination', 'meeting_point', 'status', 'vehicle_id', 'driver_label', 'capacity', 'passenger_count', 'remaining_seats', 'passengers', 'updated_at'],
     passenger: ['public_id', 'public_name', 'boarding_status'],
@@ -208,6 +214,11 @@ var CampCore = (function () {
     validation: ['status', 'blocking_error_count', 'warning_count', 'warnings'],
     warning: ['rule_code', 'message', 'count']
   });
+
+  var MEMBER_ROLES = ['member', 'leader', 'sub_leader', 'teacher'];
+  var SESSION_PARTS = ['morning', 'afternoon', 'night'];
+  var PUBLIC_SCHEMA_VERSIONS = ['public-snapshot/v1', 'public-snapshot/v2'];
+  var INTERNAL_SCHEMA_VERSION = 'internal-snapshot/v1';
 
   function unknownKeys(object, allowed) {
     if (!object || typeof object !== 'object' || Array.isArray(object)) return ['<not-object>'];
@@ -238,17 +249,78 @@ var CampCore = (function () {
     }
   }
 
-  function validatePublicSnapshot(snapshot, sensitiveValues) {
+  // 공개 표시명이 전체 실명과 동일하면 성 마스킹 실패로 간주한다(계약 공개 불변조건 #1).
+  // publisher의 05_Validation과 scripts/validate-public-data.mjs가 재사용한다.
+  function assertNoFullNames(snapshot, legalNames) {
     var issues = [];
-    if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) return [issue('PUBLIC_SCHEMA_INVALID', 'snapshot', '', '공개 스냅샷이 객체가 아닙니다.')];
-    unknownKeys(snapshot, ALLOWED.root).forEach(function (key) { issues.push(issue('PUBLIC_FIELD_NOT_ALLOWED', 'snapshot', key, '허용되지 않은 최상위 키입니다.')); });
-    ['schema_version', 'event', 'generated_at', 'updated_at', 'publish_id', 'notices', 'groups', 'vehicles', 'trips', 'unassigned_summary', 'validation'].forEach(function (key) {
-      if (snapshot[key] == null) issues.push(issue('PUBLIC_REQUIRED_FIELD_MISSING', 'snapshot', key, '필수 공개 필드가 없습니다.'));
+    var names = {};
+    (legalNames || []).forEach(function (n) {
+      var trimmed = String(n == null ? '' : n).trim();
+      if (trimmed) names[trimmed] = true;
     });
-    if (snapshot.schema_version !== 'public-snapshot/v1') issues.push(issue('PUBLIC_SCHEMA_VERSION_INVALID', 'snapshot', 'schema_version', '지원하지 않는 스키마 버전입니다.'));
+    if (!snapshot || typeof snapshot !== 'object') return issues;
+    (snapshot.groups || []).forEach(function (group) {
+      ((group && group.members) || []).forEach(function (member) {
+        var display = String(member.public_name == null ? '' : member.public_name).trim();
+        if (display && names[display]) {
+          issues.push(issue('PUBLIC_FULL_NAME_LEAK', 'member', member.public_id, '공개 표시명이 전체 실명과 동일합니다(성 마스킹 필요).'));
+        }
+      });
+    });
+    return issues;
+  }
+
+  function validatePublicSnapshot(snapshot, sensitiveValues, legalNames) {
+    return validateSnapshot_(snapshot, sensitiveValues, 'public', legalNames);
+  }
+
+  // 내부 스냅샷(internal-snapshot/v1) 검증. 공개 v2 구조 + member.full_name + 최상위 teachers[]/staff[].
+  function validateInternalSnapshot(snapshot, sensitiveValues) {
+    return validateSnapshot_(snapshot, sensitiveValues, 'internal', []);
+  }
+
+  function validateSnapshot_(snapshot, sensitiveValues, mode, legalNames) {
+    var issues = [];
+    var isInternal = mode === 'internal';
+    if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) return [issue('PUBLIC_SCHEMA_INVALID', 'snapshot', '', '스냅샷이 객체가 아닙니다.')];
+    var version = snapshot.schema_version;
+    var isPublicV2 = !isInternal && version === 'public-snapshot/v2';
+    var rootAllowed = isInternal ? ALLOWED.root.concat(ALLOWED.rootInternal) : ALLOWED.root;
+    var memberAllowed = isInternal ? ALLOWED.member.concat(ALLOWED.memberInternal) : ALLOWED.member;
+
+    unknownKeys(snapshot, rootAllowed).forEach(function (key) { issues.push(issue('PUBLIC_FIELD_NOT_ALLOWED', 'snapshot', key, '허용되지 않은 최상위 키입니다.')); });
+
+    var requiredRoot = ['schema_version', 'event', 'generated_at', 'updated_at', 'publish_id', 'notices', 'groups', 'vehicles', 'trips', 'unassigned_summary', 'validation'];
+    if (isPublicV2 || isInternal) requiredRoot = requiredRoot.concat('time_slots'); // v2/내부는 세션 정의 필수
+    if (isInternal) requiredRoot = requiredRoot.concat(['teachers', 'staff']);
+    requiredRoot.forEach(function (key) {
+      if (snapshot[key] == null) issues.push(issue('PUBLIC_REQUIRED_FIELD_MISSING', 'snapshot', key, '필수 스냅샷 필드가 없습니다.'));
+    });
+
+    var versionOk = isInternal ? version === INTERNAL_SCHEMA_VERSION : PUBLIC_SCHEMA_VERSIONS.indexOf(version) >= 0;
+    if (!versionOk) issues.push(issue('PUBLIC_SCHEMA_VERSION_INVALID', 'snapshot', 'schema_version', '지원하지 않는 스키마 버전입니다.'));
     if (snapshot.event) unknownKeys(snapshot.event, ALLOWED.event).forEach(function (key) { issues.push(issue('PUBLIC_FIELD_NOT_ALLOWED', 'event', key)); });
     var arrays = ['notices', 'groups', 'vehicles', 'trips', 'unassigned_summary'];
     arrays.forEach(function (key) { if (!Array.isArray(snapshot[key])) issues.push(issue('PUBLIC_ARRAY_REQUIRED', 'snapshot', key)); });
+
+    // ── time_slots[] (v2 신규 최상위) ──
+    var slotIds = {};
+    var expectSlots = isPublicV2 || isInternal || snapshot.time_slots != null;
+    if (expectSlots) {
+      if (!Array.isArray(snapshot.time_slots)) {
+        issues.push(issue('PUBLIC_ARRAY_REQUIRED', 'snapshot', 'time_slots'));
+      } else {
+        snapshot.time_slots.forEach(function (slot) {
+          unknownKeys(slot, ALLOWED.timeSlot).forEach(function (key) { issues.push(issue('PUBLIC_FIELD_NOT_ALLOWED', 'time_slot', key)); });
+          if (slot && slotIds[slot.slot_id]) issues.push(issue('PUBLIC_DUPLICATE_ID', 'time_slot', slot.slot_id));
+          if (slot) slotIds[slot.slot_id] = true;
+          var day = number(slot && slot.day_index, 0);
+          if (!(day >= 1 && day <= 3)) issues.push(issue('PUBLIC_ENUM_INVALID', 'time_slot', slot && slot.slot_id, 'day_index는 1~3이어야 합니다.'));
+          if (SESSION_PARTS.indexOf(String(slot && slot.part)) < 0) issues.push(issue('PUBLIC_ENUM_INVALID', 'time_slot', slot && slot.slot_id, 'part 값이 올바르지 않습니다.'));
+        });
+      }
+    }
+    var hasSlotCatalog = Object.keys(slotIds).length > 0;
 
     var publicGroups = {};
     var groupIds = {};
@@ -257,11 +329,31 @@ var CampCore = (function () {
       if (groupIds[group.group_id]) issues.push(issue('PUBLIC_DUPLICATE_ID', 'group', group.group_id));
       groupIds[group.group_id] = true;
       (group.members || []).forEach(function (member) {
-        unknownKeys(member, ALLOWED.member).forEach(function (key) { issues.push(issue('PUBLIC_FIELD_NOT_ALLOWED', 'member', key)); });
+        unknownKeys(member, memberAllowed).forEach(function (key) { issues.push(issue('PUBLIC_FIELD_NOT_ALLOWED', 'member', key)); });
+        if (member.role != null && MEMBER_ROLES.indexOf(String(member.role)) < 0) issues.push(issue('PUBLIC_ENUM_INVALID', 'member', member.public_id, 'role 값이 올바르지 않습니다.'));
+        if (member.session_slots != null) {
+          if (!Array.isArray(member.session_slots)) {
+            issues.push(issue('PUBLIC_ARRAY_REQUIRED', 'member', member.public_id));
+          } else if (hasSlotCatalog) {
+            member.session_slots.forEach(function (sid) {
+              if (!slotIds[sid]) issues.push(issue('PUBLIC_REFERENCE_BROKEN', 'member', member.public_id, 'session_slots가 존재하지 않는 slot_id를 참조합니다.'));
+            });
+          }
+        }
         if (publicGroups[member.public_id]) issues.push(issue('PUBLIC_MULTIPLE_GROUPS', 'participant', member.public_id));
         publicGroups[member.public_id] = group.group_id;
       });
     });
+
+    // ── teachers[]/staff[] (내부 스냅샷 전용) ──
+    if (isInternal) {
+      ['teachers', 'staff'].forEach(function (key) {
+        if (snapshot[key] != null && !Array.isArray(snapshot[key])) { issues.push(issue('PUBLIC_ARRAY_REQUIRED', 'snapshot', key)); return; }
+        (snapshot[key] || []).forEach(function (person) {
+          unknownKeys(person, ALLOWED.personDirectory).forEach(function (col) { issues.push(issue('PUBLIC_FIELD_NOT_ALLOWED', key, col)); });
+        });
+      });
+    }
 
     var vehicleIds = {};
     (snapshot.vehicles || []).forEach(function (vehicle) {
@@ -313,6 +405,8 @@ var CampCore = (function () {
       }
     }
     scanPublicStrings(snapshot, '$', sensitiveValues || [], issues);
+    // 공개 불변조건: 표시명이 전체 실명과 같으면 실패(내부 스냅샷은 full_name 정상 노출이므로 제외).
+    if (!isInternal) issues = issues.concat(assertNoFullNames(snapshot, legalNames || []));
     return issues;
   }
 
@@ -370,8 +464,8 @@ var CampCore = (function () {
   // ── 명단 가져오기(Roster Import) 순수 로직 ──────────────────────────────
   // 소스(엑셀/구글시트) 열기·시트 쓰기는 어댑터가 담당하고, 여기서는 매칭·upsert 계획만 결정한다.
   var ROSTER_PRIVATE_FIELDS = ['birth_date', 'phone', 'guardian_phone', 'insurance_status', 'private_note'];
-  var ROSTER_PARTICIPANT_FIELDS = ['legal_name', 'person_type', 'campus', 'grade_band', 'gender', 'engagement_score', 'newcomer', 'leader_candidate'];
-  var ROSTER_MANAGED_FIELDS = ['campus', 'grade_band', 'gender', 'engagement_score', 'newcomer', 'leader_candidate']; // update로 조건부 변경 가능(legal_name/person_type는 매칭 키라 불변)
+  var ROSTER_PARTICIPANT_FIELDS = ['legal_name', 'person_type', 'campus', 'grade_band', 'gender', 'engagement_score', 'extraversion_score', 'newcomer', 'leader_candidate'];
+  var ROSTER_MANAGED_FIELDS = ['campus', 'grade_band', 'gender', 'engagement_score', 'extraversion_score', 'newcomer', 'leader_candidate']; // update로 조건부 변경 가능(legal_name/person_type는 매칭 키라 불변)
   var ROSTER_BOOL_FIELDS = ['newcomer', 'leader_candidate'];
 
   function isBlank_(value) {
@@ -434,6 +528,7 @@ var CampCore = (function () {
         grade_band: isBlank_(pf.grade_band) ? '' : pf.grade_band,
         gender: isBlank_(pf.gender) ? '' : pf.gender,
         engagement_score: isBlank_(pf.engagement_score) ? 3 : pf.engagement_score,
+        extraversion_score: isBlank_(pf.extraversion_score) ? 3 : pf.extraversion_score,
         newcomer: bool(pf.newcomer),
         leader_candidate: bool(pf.leader_candidate),
         active: true,
@@ -610,6 +705,272 @@ var CampCore = (function () {
     }
   }
 
+  // ── 조편성 순수 로직 ──────────────────────────────────────────────────
+  // 시트 I/O는 03_Grouping.gs가 담당하고, 균형 계산·제약 판정은 여기서 결정한다.
+  // 자동 균형 대상은 학생(person_type==='student')만이며, 교사/부조장 등 수동 배정은 보존한다.
+  var GROUP_MANUAL_ROLES = ['teacher', 'sub_leader']; // 자동 배정이 덮어쓰지 않고 보존해야 하는 역할
+
+  function isStudent_(row) {
+    return String(row && row.person_type != null ? row.person_type : 'student') === 'student';
+  }
+
+  // 균형 지표(참여도·외향성·캠퍼스·학년)는 학생 기준으로만 집계한다.
+  function computeDistributionStats(participants) {
+    var campus = {}, grade = {}, engagement = 0, extraversion = 0;
+    (participants || []).forEach(function (row) {
+      campus[String(row.campus || 'unknown')] = (campus[String(row.campus || 'unknown')] || 0) + 1;
+      grade[String(row.grade_band || 'unknown')] = (grade[String(row.grade_band || 'unknown')] || 0) + 1;
+      engagement += number(row.engagement_score, 3);
+      extraversion += number(row.extraversion_score, 3);
+    });
+    var count = Math.max(1, (participants || []).length);
+    return {
+      count: count,
+      campus: campus,
+      grade: grade,
+      engagementMean: engagement / count,
+      extraversionMean: extraversion / count
+    };
+  }
+
+  // 후보 조에 묶음을 넣었을 때의 증분 페널티. 낮을수록 균형에 유리하다.
+  function incrementalGroupPenalty(candidate, bundle, global) {
+    var members = candidate.members.concat(bundle);
+    var students = members.filter(isStudent_); // 교사/스탭 등 수동 배정 인원은 균형 계산에서 제외
+    var denom = Math.max(1, students.length);
+    var target = number(candidate.group.target_size, 0);
+    if (target <= 0) target = Math.ceil(global.count / Math.max(1, global.groupCount));
+    var score = Math.abs(students.length - target) * 30;
+    var engagement = students.reduce(function (sum, row) { return sum + number(row.engagement_score, 3); }, 0) / denom;
+    score += Math.abs(engagement - global.engagementMean) * 12;
+    var extraversion = students.reduce(function (sum, row) { return sum + number(row.extraversion_score, 3); }, 0) / denom;
+    score += Math.abs(extraversion - global.extraversionMean) * 12; // 외향성 균형 축(참여도와 동일 가중치)
+    ['campus', 'grade_band'].forEach(function (field) {
+      var globalCounts = field === 'campus' ? global.campus : global.grade;
+      Object.keys(globalCounts).forEach(function (value) {
+        var localRatio = students.filter(function (row) { return String(row[field] || 'unknown') === value; }).length / denom;
+        score += Math.abs(localRatio - globalCounts[value] / global.count) * 9;
+      });
+    });
+    if (!students.some(function (row) { return bool(row.leader_candidate); })) score += 20;
+    var newcomerTarget = 1;
+    score += Math.abs(students.filter(function (row) { return bool(row.newcomer); }).length - newcomerTarget) * 12;
+    return score;
+  }
+
+  function computeGroupProposal(data, options) {
+    data = data || {};
+    options = options || {};
+    var counter = 0;
+    var idFactory = options.idFactory || function () { counter += 1; return 'ga_' + counter; };
+    var now = options.now || '';
+    var updatedBy = options.updatedBy || 'operator';
+    var issues = [];
+
+    var groups = (data.groups || []).filter(function (row) { return bool(row.active); });
+    if (!groups.length) return { assignments: [], issues: [issue('NO_ACTIVE_GROUP', 'group', '', '활성 조가 없습니다.')] };
+
+    var attendanceByPerson = groupBy(data.attendance || [], 'participant_id');
+    var useAttendance = (data.attendance || []).length > 0;
+    function isPresent_(row) {
+      if (!useAttendance) return true;
+      return (attendanceByPerson[String(row.participant_id)] || []).some(function (slot) { return String(slot.presence_status) === 'present'; });
+    }
+    var activeParticipants = (data.participants || []).filter(function (row) { return bool(row.active) && isPresent_(row); });
+    var students = activeParticipants.filter(isStudent_); // 자동 균형 대상은 학생만
+
+    issues = issues.concat(findBundleRelationConflicts(students, data.relations || []));
+    if (blockingIssues(issues).length) return { assignments: [], issues: issues };
+
+    var byId = indexBy(activeParticipants, 'participant_id'); // 교사 포함(정원·역할 보존)
+
+    // 잠금/수동/역할(teacher·sub_leader) 배정은 자동 편성이 덮어쓰지 않고 보존한다.
+    var preserved = (data.groupAssignments || []).filter(function (row) {
+      return bool(row.locked) || String(row.assignment_source) === 'manual' || GROUP_MANUAL_ROLES.indexOf(String(row.role)) >= 0;
+    }).filter(function (row) { return byId[String(row.participant_id)]; });
+
+    var state = {};
+    groups.forEach(function (group) { state[String(group.group_id)] = { group: group, members: [], roles: {} }; });
+    preserved.forEach(function (row) {
+      var st = state[String(row.group_id)];
+      if (!st) { issues.push(issue('LOCK_CONFLICT', 'assignment', row.assignment_id, '잠금/수동 배정의 조가 비활성입니다.')); return; }
+      st.members.push(byId[String(row.participant_id)]);
+      if (row.role) st.roles[String(row.role)] = (st.roles[String(row.role)] || 0) + 1;
+    });
+
+    // must_together 묶음(학생 대상) 구성
+    var parent = {};
+    students.forEach(function (row) { parent[String(row.participant_id)] = String(row.participant_id); });
+    function find(id) { while (parent[id] !== id) { parent[id] = parent[parent[id]]; id = parent[id]; } return id; }
+    function unite(a, b) { if (!parent[a] || !parent[b]) return; var ra = find(a), rb = find(b); if (ra !== rb) parent[rb] = ra; }
+    (data.relations || []).filter(function (row) { return bool(row.active) && row.relation_type === 'must_together'; })
+      .forEach(function (row) { unite(String(row.participant_a_id), String(row.participant_b_id)); });
+    var bundles = {};
+    students.forEach(function (row) { var root = find(String(row.participant_id)); if (!bundles[root]) bundles[root] = []; bundles[root].push(row); });
+
+    var preservedByPerson = indexBy(preserved, 'participant_id');
+    var separatePairs = {};
+    (data.relations || []).filter(function (row) { return bool(row.active) && row.relation_type === 'must_separate'; }).forEach(function (row) {
+      separatePairs[String(row.participant_a_id) + '|' + String(row.participant_b_id)] = true;
+      separatePairs[String(row.participant_b_id) + '|' + String(row.participant_a_id)] = true;
+    });
+
+    var unassignedBundles = Object.keys(bundles).map(function (key) { return bundles[key]; });
+    // 큰 묶음과 희소한 리더/새친구를 먼저 배정한다. ID 정렬로 재실행 결과를 결정적으로 만든다.
+    unassignedBundles.sort(function (a, b) {
+      var aPriority = a.length * 100 + a.filter(function (p) { return bool(p.leader_candidate) || bool(p.newcomer); }).length * 10;
+      var bPriority = b.length * 100 + b.filter(function (p) { return bool(p.leader_candidate) || bool(p.newcomer); }).length * 10;
+      return bPriority - aPriority || String(a[0].participant_id).localeCompare(String(b[0].participant_id));
+    });
+
+    var generated = [];
+    var global = computeDistributionStats(students);
+    global.groupCount = groups.length;
+
+    unassignedBundles.forEach(function (bundle) {
+      var existingGroups = bundle.map(function (p) { return preservedByPerson[String(p.participant_id)]; }).filter(Boolean).map(function (row) { return String(row.group_id); });
+      var uniqueExisting = existingGroups.filter(function (id, index, list) { return list.indexOf(id) === index; });
+      if (uniqueExisting.length > 1) {
+        issues.push(issue('LOCK_CONFLICT', 'participant_bundle', bundle[0].participant_id, 'must_together 묶음이 서로 다른 수동 조에 고정되었습니다.'));
+        return;
+      }
+      if (uniqueExisting.length === 1) {
+        var fixedState = state[uniqueExisting[0]];
+        var toAdd = bundle.filter(function (p) { return !preservedByPerson[String(p.participant_id)]; });
+        if (fixedState.members.length + toAdd.length > number(fixedState.group.max_size, 999)) {
+          issues.push(issue('GROUP_SIZE_EXCEEDED', 'group', fixedState.group.group_id, '고정 묶음으로 조 최대 인원을 초과합니다.'));
+          return;
+        }
+        toAdd.forEach(function (p) { addGeneratedAssignment_(fixedState, p, 'MUST_TOGETHER_FIXED'); });
+        return;
+      }
+      var candidates = groups.map(function (group) { return state[String(group.group_id)]; }).filter(function (candidate) {
+        if (candidate.members.length + bundle.length > number(candidate.group.max_size, 999)) return false;
+        return !bundle.some(function (person) {
+          return candidate.members.some(function (member) { return separatePairs[String(person.participant_id) + '|' + String(member.participant_id)]; });
+        });
+      }).map(function (candidate) {
+        return { state: candidate, score: incrementalGroupPenalty(candidate, bundle, global) };
+      }).sort(function (a, b) { return a.score - b.score || String(a.state.group.group_id).localeCompare(String(b.state.group.group_id)); });
+      if (!candidates.length) {
+        issues.push(issue('CONSTRAINT_CONFLICT', 'participant_bundle', bundle[0].participant_id, '배치 가능한 조가 없습니다.'));
+        return;
+      }
+      bundle.forEach(function (person) { addGeneratedAssignment_(candidates[0].state, person, 'BALANCED_GREEDY'); });
+    });
+
+    // 조당 조장 1 + 부조장 1 확보 우대: 없으면 경고 이슈(수동 지정 우선, 자동은 leader/member만 부여)
+    groups.forEach(function (group) {
+      var st = state[String(group.group_id)];
+      if (!(st.roles['leader'] > 0)) issues.push(issue('GROUP_MISSING_LEADER', 'group', group.group_id, '조에 조장(leader)이 없습니다. 수동 지정을 검토하세요.', false, 'warning'));
+      if (!(st.roles['sub_leader'] > 0)) issues.push(issue('GROUP_MISSING_SUBLEADER', 'group', group.group_id, '조에 부조장(sub_leader)이 없습니다. 수동 지정을 검토하세요.', false, 'warning'));
+    });
+
+    return { assignments: generated, issues: issues };
+
+    function addGeneratedAssignment_(candidate, person, reason) {
+      // 자동 배정은 학생에게 leader/member만 부여한다(teacher/sub_leader는 수동 배정 전용).
+      var hasLeaderRole = (candidate.roles['leader'] || 0) > 0;
+      var role = bool(person.leader_candidate) && !hasLeaderRole ? 'leader' : 'member';
+      candidate.members.push(person);
+      candidate.roles[role] = (candidate.roles[role] || 0) + 1;
+      generated.push({
+        assignment_id: idFactory(),
+        participant_id: person.participant_id,
+        group_id: candidate.group.group_id,
+        role: role,
+        locked: false,
+        assignment_source: 'auto',
+        score_delta: '',
+        reason_codes: reason,
+        revision: 1,
+        updated_at: now,
+        updated_by: updatedBy
+      });
+    }
+  }
+
+  // ── 성 마스킹(공개 표시명) ────────────────────────────────────────────
+  // 복성 예외목록: 첫 2글자를 성으로 본다.
+  var COMPOUND_SURNAMES = ['남궁', '황보', '선우', '제갈', '독고', '사공', '서문', '동방', '어금', '망절'];
+
+  function maskSurname(legalName) {
+    var raw = String(legalName == null ? '' : legalName);
+    if (typeof raw.normalize === 'function') raw = raw.normalize('NFC');
+    var trimmed = raw.trim();
+    var name = trimmed.replace(/\s+/g, '');
+    if (!name) return '';
+    // 비한글(영문 등)·공백 포함 이름: 첫 토큰 + '*' 폴백. 이름 전체 노출 금지.
+    if (!/^[가-힣]+$/.test(name)) {
+      var token = trimmed.split(/\s+/)[0] || '';
+      return token ? token + '*' : '*';
+    }
+    var surnameLen = (name.length >= 3 && COMPOUND_SURNAMES.indexOf(name.slice(0, 2)) >= 0) ? 2 : 1;
+    if (name.length <= surnameLen) return name + '*'; // 한 글자 이름 등
+    var masked = '';
+    for (var i = surnameLen; i < name.length; i += 1) masked += '○';
+    return name.slice(0, surnameLen) + masked;
+  }
+
+  // ── 내부 인증 검증(순수) ──────────────────────────────────────────────
+  // password를 주입된 해시함수로 해시 후 저장 해시와 상수시간 비교하고, user 일치까지 확인한다.
+  function constantTimeEquals_(a, b) {
+    a = String(a == null ? '' : a);
+    b = String(b == null ? '' : b);
+    if (a.length !== b.length) return false;
+    var diff = 0;
+    for (var i = 0; i < a.length; i += 1) diff |= (a.charCodeAt(i) ^ b.charCodeAt(i));
+    return diff === 0;
+  }
+
+  function verifyInternalCredential(user, password, storedUser, storedPwHash, sha256hex) {
+    if (typeof sha256hex !== 'function') return false;
+    if (isBlank_(storedUser) || isBlank_(storedPwHash)) return false;
+    if (isBlank_(user) || password == null) return false;
+    var computed = String(sha256hex(String(password)) || '').trim().toLowerCase();
+    var stored = String(storedPwHash).trim().toLowerCase();
+    // 상수시간 비교 두 항목을 모두 계산한 뒤 AND(단락 평가로 인한 타이밍 누출 완화).
+    var userOk = constantTimeEquals_(String(user), String(storedUser));
+    var pwOk = constantTimeEquals_(computed, stored);
+    return userOk && pwOk;
+  }
+
+  // ── 세션(프로그램 시간대) 표시 헬퍼 ───────────────────────────────────
+  var SESSION_PART_LABELS = { morning: '오전', afternoon: '오후', night: '밤' };
+  var STANDARD_SESSION_DEFS = [
+    { day_index: 1, part: 'morning' }, { day_index: 1, part: 'afternoon' }, { day_index: 1, part: 'night' },
+    { day_index: 2, part: 'morning' }, { day_index: 2, part: 'afternoon' }, { day_index: 2, part: 'night' },
+    { day_index: 3, part: 'morning' }
+  ];
+
+  function sessionPartLabel(part) {
+    return SESSION_PART_LABELS[String(part)] || '';
+  }
+
+  // 참가자의 present 세션 slot_id 배열을 산출한다. participantId가 주어지면 해당 참가자만 필터한다.
+  function presentSlotIds(attendanceRows, participantId) {
+    return (attendanceRows || []).filter(function (row) {
+      if (participantId != null && String(row.participant_id) !== String(participantId)) return false;
+      return String(row.presence_status) === 'present';
+    }).map(function (row) { return String(row.slot_id); });
+  }
+
+  // 표준 7세션 시드(첫날 오전/오후/밤, 2일 오전/오후/밤, 3일 오전). 시트 헤더 키와 일치하는 객체 배열.
+  function buildStandardTimeSlots(eventId) {
+    return STANDARD_SESSION_DEFS.map(function (def) {
+      return {
+        slot_id: 'S_D' + def.day_index + '_' + def.part.toUpperCase(),
+        event_id: eventId || '',
+        label: def.day_index + '일차 ' + sessionPartLabel(def.part),
+        starts_at: '',
+        ends_at: '',
+        core_program: true,
+        day_index: def.day_index,
+        part: def.part
+      };
+    });
+  }
+
   return {
     issue: issue,
     bool: bool,
@@ -619,6 +980,8 @@ var CampCore = (function () {
     intervalsOverlap: intervalsOverlap,
     validateInternalModel: validateInternalModel,
     validatePublicSnapshot: validatePublicSnapshot,
+    validateInternalSnapshot: validateInternalSnapshot,
+    assertNoFullNames: assertNoFullNames,
     blockingIssues: blockingIssues,
     findBundleRelationConflicts: findBundleRelationConflicts,
     runPublicationTransaction: runPublicationTransaction,
@@ -626,7 +989,15 @@ var CampCore = (function () {
     normalizeRosterKey: normalizeRosterKey,
     routePrivateFields: routePrivateFields,
     findRosterPrivateLeak: findRosterPrivateLeak,
-    planRosterUpsert: planRosterUpsert
+    planRosterUpsert: planRosterUpsert,
+    computeDistributionStats: computeDistributionStats,
+    incrementalGroupPenalty: incrementalGroupPenalty,
+    computeGroupProposal: computeGroupProposal,
+    maskSurname: maskSurname,
+    verifyInternalCredential: verifyInternalCredential,
+    sessionPartLabel: sessionPartLabel,
+    presentSlotIds: presentSlotIds,
+    buildStandardTimeSlots: buildStandardTimeSlots
   };
 }());
 

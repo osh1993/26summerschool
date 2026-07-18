@@ -86,7 +86,8 @@ function syncOneFormSheet_(sourceSheetName, defaultPersonType, cursorSettingKey)
       leader_candidate: asBoolean_(normalized.leader_candidate),
       active: true,
       source_response_id: sourceResponseId,
-      updated_at: nowIso_()
+      updated_at: nowIso_(),
+      extraversion_score: clamp_(asNumber_(normalized.extraversion_score, 3), 1, 5)
     });
     privateToAppend.push({
       participant_id: participantId,

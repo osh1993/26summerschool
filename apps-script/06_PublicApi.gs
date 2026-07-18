@@ -33,11 +33,58 @@ function publishPublicSnapshot() {
   }
 }
 
-function buildPublicSnapshot_(data, publishId, preIssues) {
+// 캠퍼스 코드 → 공개 표시 라벨. 알 수 없는 코드는 원문을 그대로 표시(민감정보 아님).
+var PUBLIC_CAMPUS_LABELS = { imd: '임동', suwan: '수완', other: '기타' };
+function publicCampusLabel_(code) {
+  var key = String(code == null ? '' : code).trim();
+  if (!key) return '';
+  return PUBLIC_CAMPUS_LABELS[key] || key;
+}
+
+// 세션 정렬용 part 우선순위(오전<오후<밤).
+var SESSION_PART_ORDER = { morning: 0, afternoon: 1, night: 2 };
+
+// data.timeSlots(활성 행) → 공개 time_slots[] ({slot_id,label,day_index,part}).
+function buildPublicTimeSlots_(data) {
+  return (data.timeSlots || [])
+    .filter(function (row) { return String(row.slot_id == null ? '' : row.slot_id).trim(); })
+    .map(function (row) {
+      return {
+        slot_id: String(row.slot_id),
+        label: String(row.label == null ? '' : row.label),
+        day_index: CampCore.number(row.day_index, 0),
+        part: String(row.part == null ? '' : row.part)
+      };
+    })
+    .sort(function (a, b) {
+      if (a.day_index !== b.day_index) return a.day_index - b.day_index;
+      return (SESSION_PART_ORDER[a.part] == null ? 9 : SESSION_PART_ORDER[a.part]) - (SESSION_PART_ORDER[b.part] == null ? 9 : SESSION_PART_ORDER[b.part]);
+    });
+}
+
+// person_type별 교사/스탭 디렉터리(내부 스냅샷 전용). 실명 포함이므로 공개 스냅샷에는 절대 넣지 않는다.
+function buildPersonDirectory_(data, groupIdByParticipant, personType) {
+  return (data.participants || [])
+    .filter(function (p) { return String(p.person_type) === personType && CampCore.bool(p.active); })
+    .map(function (p) {
+      return {
+        participant_id: String(p.participant_id),
+        full_name: String(p.legal_name == null ? '' : p.legal_name),
+        campus: publicCampusLabel_(p.campus),
+        group_id: groupIdByParticipant[String(p.participant_id)] || null
+      };
+    });
+}
+
+// internal=true면 각 member에 full_name(legal_name)과 최상위 teachers[]/staff[]를 덧붙인 internal-snapshot/v1을 만든다.
+function buildPublicSnapshot_(data, publishId, preIssues, internal) {
   var participants = CampCore.indexBy(data.participants, 'participant_id');
   var vehicles = CampCore.indexBy(data.vehicles, 'vehicle_id');
   var locations = CampCore.indexBy(data.locations, 'location_id');
   var assignmentsByGroup = CampCore.groupBy(data.groupAssignments, 'group_id');
+  var attendanceRows = data.attendance || [];
+  var groupIdByParticipant = {};
+  (data.groupAssignments || []).forEach(function (a) { groupIdByParticipant[String(a.participant_id)] = String(a.group_id); });
   var passengersByTrip = CampCore.groupBy((data.tripPassengers || []).filter(function (row) {
     return ['cancelled', 'no_show'].indexOf(String(row.boarding_status)) < 0;
   }), 'trip_id');
@@ -45,15 +92,28 @@ function buildPublicSnapshot_(data, publishId, preIssues) {
   (data.groupAssignments || []).concat(data.trips || []).concat(data.tripPassengers || []).forEach(function (row) { if (row.updated_at) updatedValues.push(dateToIso_(row.updated_at)); });
   updatedValues.sort();
   var generatedAt = nowIso_();
+  var timeSlots = buildPublicTimeSlots_(data);
   var groups = (data.groups || []).filter(function (row) { return CampCore.bool(row.active); }).map(function (group) {
     return {
       group_id: String(group.group_id),
       display_name: String(group.display_name),
       color: group.color ? String(group.color) : undefined,
+      // public_consent=false 참가자는 공개 명단에서만 제외한다(내부 뷰는 전원 포함). 표시명은 항상 성 마스킹으로 파생한다.
       members: (assignmentsByGroup[String(group.group_id)] || []).map(function (assignment) {
         var person = participants[String(assignment.participant_id)];
-        return { public_id: String(person.public_id), public_name: String(person.public_name), role: String(assignment.role || 'member') };
-      })
+        if (!person) return null;
+        // 공개 뷰에만 동의 게이트를 적용한다. 내부(인증) 뷰는 운영자·교사용이므로 비동의자도 전원 포함한다.
+        if (!internal && !CampCore.bool(person.public_consent)) return null;
+        var member = {
+          public_id: String(person.public_id),
+          public_name: CampCore.maskSurname(person.legal_name),
+          role: String(assignment.role || 'member'),
+          campus: publicCampusLabel_(person.campus),
+          session_slots: CampCore.presentSlotIds(attendanceRows, person.participant_id)
+        };
+        if (internal) member.full_name = String(person.legal_name == null ? '' : person.legal_name);
+        return member;
+      }).filter(function (member) { return member; })
     };
   });
   var publicVehicles = (data.vehicles || []).filter(function (row) { return CampCore.bool(row.active); }).map(function (vehicle) {
@@ -106,7 +166,7 @@ function buildPublicSnapshot_(data, publishId, preIssues) {
   var publicWarnings = CampCore.aggregatePublicWarnings(preIssues || []);
   var warningCount = publicWarnings.reduce(function (sum, row) { return sum + row.count; }, 0);
   return removeUndefined_({
-    schema_version: CAMP.SCHEMA_VERSION,
+    schema_version: internal ? CAMP.INTERNAL_SCHEMA_VERSION : CAMP.SCHEMA_VERSION,
     event: {
       event_id: String(data.settings.EVENT_ID),
       name: String(data.settings.EVENT_NAME),
@@ -118,12 +178,21 @@ function buildPublicSnapshot_(data, publishId, preIssues) {
     updated_at: updatedValues.length ? updatedValues[updatedValues.length - 1] : generatedAt,
     publish_id: publishId,
     notices: notices,
+    time_slots: timeSlots,
     groups: groups,
     vehicles: publicVehicles,
     trips: publicTrips,
     unassigned_summary: Object.keys(unassignedBuckets).sort().map(function (key) { return unassignedBuckets[key]; }),
-    validation: { status: warningCount > 0 ? 'warning' : 'ok', blocking_error_count: 0, warning_count: warningCount, warnings: publicWarnings }
+    validation: { status: warningCount > 0 ? 'warning' : 'ok', blocking_error_count: 0, warning_count: warningCount, warnings: publicWarnings },
+    teachers: internal ? buildPersonDirectory_(data, groupIdByParticipant, 'teacher') : undefined,
+    staff: internal ? buildPersonDirectory_(data, groupIdByParticipant, 'staff') : undefined
   });
+}
+
+// 내부 스냅샷(internal-snapshot/v1)을 조립한다. 정적 파일로 저장하지 않고 doPost 응답으로만 반환한다.
+function buildInternalSnapshot_(data) {
+  var publishId = 'internal-' + Utilities.formatDate(new Date(), CAMP.TIMEZONE, 'yyyyMMdd-HHmmss');
+  return buildPublicSnapshot_(data, publishId, [], true);
 }
 
 function removeUndefined_(value) {
@@ -183,6 +252,32 @@ function doGet(e) {
     return jsonResponse_(snapshot);
   } catch (error) {
     // 공개 응답에는 스택, 시트명, 셀 범위, 내부 ID를 포함하지 않는다.
+    return jsonResponse_({ error: 'temporarily_unavailable' });
+  }
+}
+
+// 인증 내부 뷰: {user, password}를 받아 Script Property의 공용 자격증명으로 검증한 뒤에만 실명 포함 내부 스냅샷을 반환한다.
+// 성공해도 정적 파일로 저장하지 않는다. 실패/미설정/오류 시에는 힌트 없는 오류만 반환한다.
+function doPost(e) {
+  try {
+    var body = {};
+    if (e && e.postData && e.postData.contents) {
+      try { body = JSON.parse(e.postData.contents) || {}; } catch (parseError) { body = {}; }
+    }
+    var props = PropertiesService.getScriptProperties();
+    var storedUser = props.getProperty('CAMP_INTERNAL_USER');
+    var storedPwHash = props.getProperty('CAMP_INTERNAL_PW_HASH');
+    // Script Property 미설정이면 verifyInternalCredential이 false를 반환하므로 자연히 unauthorized가 된다.
+    var authorized = CampCore.verifyInternalCredential(body.user, body.password, storedUser, storedPwHash, sha256Hex_);
+    if (!authorized) return jsonResponse_({ error: 'unauthorized' });
+    var data = readOperationalData_();
+    var snapshot = buildInternalSnapshot_(data);
+    // 내부 스냅샷 구조를 점검하되, 개인 민감 원문(전화/생년월일 등)만 유출 카나리로 검사한다(실명·내부ID는 내부뷰 정상 노출).
+    var structural = CampCore.validateInternalSnapshot(snapshot, collectPrivateCanaries_(data));
+    if (CampCore.blockingIssues(structural).length) return jsonResponse_({ error: 'temporarily_unavailable' });
+    return jsonResponse_(snapshot);
+  } catch (error) {
+    // 내부 응답 오류에도 스택, 시트명, 셀 범위, 내부 ID를 포함하지 않는다.
     return jsonResponse_({ error: 'temporarily_unavailable' });
   }
 }

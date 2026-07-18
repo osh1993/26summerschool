@@ -214,4 +214,168 @@ assert.deepStrictEqual(
   Core.planRosterUpsert(existingOne(), [], equalityRows, rosterMap, { mode: 'commit', eventId: 'e' }).summary
 );
 
+// ── 성 마스킹 ────────────────────────────────────────────────────────────
+assert.strictEqual(Core.maskSurname('홍길동'), '홍○○');       // 단성 3자
+assert.strictEqual(Core.maskSurname('김수'), '김○');           // 단성 2자
+assert.strictEqual(Core.maskSurname('남궁민수'), '남궁○○');    // 복성 4자
+assert.strictEqual(Core.maskSurname('선우정아'), '선우○○');    // 복성 4자
+assert.strictEqual(Core.maskSurname('John Smith'), 'John*');    // 영문 폴백(성 미노출)
+assert.strictEqual(Core.maskSurname('김'), '김*');              // 한 글자 이름 폴백
+assert.strictEqual(Core.maskSurname(''), '');
+assert.strictEqual(Core.maskSurname('   '), '');
+
+// ── 내부 인증 검증(순수, 해시함수 주입) ──────────────────────────────────
+const crypto = require('crypto');
+function sha256hex(text) { return crypto.createHash('sha256').update(String(text)).digest('hex'); }
+const storedHash = sha256hex('secret-pw');
+assert.strictEqual(Core.verifyInternalCredential('camp', 'secret-pw', 'camp', storedHash, sha256hex), true);   // 정답
+assert.strictEqual(Core.verifyInternalCredential('camp', 'wrong-pw', 'camp', storedHash, sha256hex), false);   // 오답(비번)
+assert.strictEqual(Core.verifyInternalCredential('intruder', 'secret-pw', 'camp', storedHash, sha256hex), false); // 오답(ID)
+assert.strictEqual(Core.verifyInternalCredential('camp', 'secret-pw', 'camp', storedHash.toUpperCase(), sha256hex), true); // hex 대소문자 무관
+assert.strictEqual(Core.verifyInternalCredential('camp', 'secret-pw', '', storedHash, sha256hex), false);      // 미설정 storedUser
+assert.strictEqual(Core.verifyInternalCredential('camp', 'secret-pw', 'camp', storedHash, null), false);       // 해시함수 미주입
+
+// ── 세션 표시 헬퍼 ───────────────────────────────────────────────────────
+assert.strictEqual(Core.sessionPartLabel('morning'), '오전');
+assert.strictEqual(Core.sessionPartLabel('afternoon'), '오후');
+assert.strictEqual(Core.sessionPartLabel('night'), '밤');
+assert.strictEqual(Core.sessionPartLabel('unknown'), '');
+const attendanceRows = [
+  { participant_id: 'p1', slot_id: 'S_D1_MORNING', presence_status: 'present' },
+  { participant_id: 'p1', slot_id: 'S_D1_NIGHT', presence_status: 'absent' },
+  { participant_id: 'p2', slot_id: 'S_D1_MORNING', presence_status: 'present' }
+];
+assert.deepStrictEqual(Core.presentSlotIds(attendanceRows, 'p1'), ['S_D1_MORNING']);
+assert.deepStrictEqual(Core.presentSlotIds(attendanceRows), ['S_D1_MORNING', 'S_D1_MORNING']);
+const stdSlots = Core.buildStandardTimeSlots('2026-summer');
+assert.strictEqual(stdSlots.length, 7);
+assert.strictEqual(stdSlots[0].slot_id, 'S_D1_MORNING');
+assert.strictEqual(stdSlots[0].label, '1일차 오전');
+assert.strictEqual(stdSlots[0].event_id, '2026-summer');
+assert.strictEqual(stdSlots[6].day_index, 3);
+assert.strictEqual(stdSlots[6].part, 'morning');
+
+// ── 외향성 균형 축 ───────────────────────────────────────────────────────
+const distStats = Core.computeDistributionStats([
+  { extraversion_score: 1, engagement_score: 2 },
+  { extraversion_score: 5, engagement_score: 4 }
+]);
+assert.strictEqual(distStats.extraversionMean, 3);
+assert.strictEqual(distStats.engagementMean, 3);
+const balGlobal = { count: 4, groupCount: 2, engagementMean: 3, extraversionMean: 3, campus: { imd: 4 }, grade: { unknown: 4 } };
+const highCand = { group: { group_id: 'G1', target_size: 2 }, members: [{ person_type: 'student', extraversion_score: 5, engagement_score: 3, campus: 'imd' }] };
+const lowCand = { group: { group_id: 'G2', target_size: 2 }, members: [{ person_type: 'student', extraversion_score: 1, engagement_score: 3, campus: 'imd' }] };
+const addHigh = [{ person_type: 'student', extraversion_score: 5, engagement_score: 3, campus: 'imd' }];
+const pHigh = Core.incrementalGroupPenalty(highCand, addHigh, balGlobal);
+const pLow = Core.incrementalGroupPenalty(lowCand, addHigh, balGlobal);
+assert.ok(pHigh > pLow, '외향성이 편중되는 조에 더 높은 페널티가 부여되어야 한다');
+assert.strictEqual(Math.round((pHigh - pLow) * 1000) / 1000, 24); // 외향성 편차 항(가중치 12)만 차이
+
+// ── 학생만 자동 배정 + 교사 role 보존 ────────────────────────────────────
+const studentOnly = Core.computeGroupProposal({
+  groups: [{ group_id: 'G1', active: true, max_size: 999 }],
+  participants: [
+    { participant_id: 's1', person_type: 'student', active: true },
+    { participant_id: 's2', person_type: 'student', active: true },
+    { participant_id: 't1', person_type: 'teacher', active: true }
+  ],
+  attendance: [], relations: [],
+  groupAssignments: [{ assignment_id: 'm1', participant_id: 't1', group_id: 'G1', role: 'teacher', assignment_source: 'manual' }]
+}, {});
+const studentAssigned = studentOnly.assignments.map((a) => a.participant_id).sort();
+assert.deepStrictEqual(studentAssigned, ['s1', 's2']);           // 학생만 자동 배정
+studentOnly.assignments.forEach((a) => assert.ok(['leader', 'member'].includes(a.role))); // 자동은 leader/member만
+
+// ── 부조장(sub_leader) 수동 배정 보존 + 역할 확보 경고 ───────────────────
+const subProposal = Core.computeGroupProposal({
+  groups: [{ group_id: 'G1', active: true, max_size: 999 }],
+  participants: [
+    { participant_id: 's1', person_type: 'student', active: true, leader_candidate: true },
+    { participant_id: 's2', person_type: 'student', active: true }
+  ],
+  attendance: [], relations: [],
+  groupAssignments: [{ assignment_id: 'm2', participant_id: 's2', group_id: 'G1', role: 'sub_leader', assignment_source: 'manual' }]
+}, {});
+const subAssigned = subProposal.assignments.map((a) => a.participant_id);
+assert.ok(!subAssigned.includes('s2'));                          // 부조장 수동 배정 보존(재배정 금지)
+assert.strictEqual(subProposal.assignments.find((a) => a.participant_id === 's1').role, 'leader'); // 리더 자동 부여
+const subCodes = ruleCodes(subProposal.issues);
+assert.ok(!subCodes.includes('GROUP_MISSING_LEADER'));           // leader(자동)·sub_leader(수동) 모두 있음
+assert.ok(!subCodes.includes('GROUP_MISSING_SUBLEADER'));
+const missingRoles = ruleCodes(Core.computeGroupProposal({
+  groups: [{ group_id: 'G1', active: true, max_size: 999 }],
+  participants: [{ participant_id: 's1', person_type: 'student', active: true }],
+  attendance: [], relations: [], groupAssignments: []
+}, {}).issues);
+assert.ok(missingRoles.includes('GROUP_MISSING_LEADER'));        // 조장 없음 경고
+assert.ok(missingRoles.includes('GROUP_MISSING_SUBLEADER'));     // 부조장 없음 경고
+
+// 로스터 insert에 외향성 기본값(3) 반영
+assert.strictEqual(rosterInsert.inserts[0].participant.extraversion_score, 3);
+
+// ── 공개 스냅샷 v2 검증(수용/거부) ───────────────────────────────────────
+function validV2Snapshot() {
+  const s = validSnapshot();
+  s.schema_version = 'public-snapshot/v2';
+  s.time_slots = [
+    { slot_id: 'S_D1_MORNING', label: '1일차 오전', day_index: 1, part: 'morning' },
+    { slot_id: 'S_D1_NIGHT', label: '1일차 밤', day_index: 1, part: 'night' }
+  ];
+  s.groups[0].members[0].campus = '임동';
+  s.groups[0].members[0].session_slots = ['S_D1_MORNING'];
+  s.groups[0].members.push({ public_id: 'P-XYZ789', public_name: '남궁○○', role: 'sub_leader', campus: '수완', session_slots: [] });
+  return s;
+}
+// v1은 하위호환으로 계속 통과, v2 정본도 통과
+assert.deepStrictEqual(Core.validatePublicSnapshot(validSnapshot(), []), []);
+assert.deepStrictEqual(Core.validatePublicSnapshot(validV2Snapshot(), []), []);
+// role 어휘 확장 수용
+const v2Roles = validV2Snapshot(); v2Roles.groups[0].members[0].role = 'teacher';
+assert.deepStrictEqual(Core.validatePublicSnapshot(v2Roles, []), []);
+// v2인데 time_slots 누락 → 필수 필드 누락
+const v2NoSlots = validV2Snapshot(); delete v2NoSlots.time_slots;
+assert.ok(ruleCodes(Core.validatePublicSnapshot(v2NoSlots, [])).includes('PUBLIC_REQUIRED_FIELD_MISSING'));
+// part/day_index enum 위반
+const v2BadPart = validV2Snapshot(); v2BadPart.time_slots[0].part = 'evening';
+assert.ok(ruleCodes(Core.validatePublicSnapshot(v2BadPart, [])).includes('PUBLIC_ENUM_INVALID'));
+const v2BadDay = validV2Snapshot(); v2BadDay.time_slots[0].day_index = 4;
+assert.ok(ruleCodes(Core.validatePublicSnapshot(v2BadDay, [])).includes('PUBLIC_ENUM_INVALID'));
+// role enum 위반
+const v2BadRole = validV2Snapshot(); v2BadRole.groups[0].members[0].role = 'captain';
+assert.ok(ruleCodes(Core.validatePublicSnapshot(v2BadRole, [])).includes('PUBLIC_ENUM_INVALID'));
+// session_slots가 존재하지 않는 slot 참조
+const v2BadRef = validV2Snapshot(); v2BadRef.groups[0].members[0].session_slots = ['S_NOPE'];
+assert.ok(ruleCodes(Core.validatePublicSnapshot(v2BadRef, [])).includes('PUBLIC_REFERENCE_BROKEN'));
+// 실명 필드 유입 거부
+const v2Extra = validV2Snapshot(); v2Extra.groups[0].members[0].legal_name = '실명';
+assert.ok(ruleCodes(Core.validatePublicSnapshot(v2Extra, [])).includes('PUBLIC_FIELD_NOT_ALLOWED'));
+
+// ── 전체 실명 부재 불변조건 ──────────────────────────────────────────────
+const v2Leak = validV2Snapshot(); v2Leak.groups[0].members[0].public_name = '홍길동';
+assert.ok(ruleCodes(Core.validatePublicSnapshot(v2Leak, [], ['홍길동', '김하늘'])).includes('PUBLIC_FULL_NAME_LEAK'));
+assert.deepStrictEqual(ruleCodes(Core.assertNoFullNames(v2Leak, ['홍길동'])), ['PUBLIC_FULL_NAME_LEAK']);
+assert.deepStrictEqual(Core.assertNoFullNames(validV2Snapshot(), ['홍길동']), []); // 마스킹된 표시명은 통과
+
+// ── 내부 스냅샷 v1 검증 ──────────────────────────────────────────────────
+function validInternalSnapshot() {
+  const s = validV2Snapshot();
+  s.schema_version = 'internal-snapshot/v1';
+  s.groups[0].members[0].full_name = '홍길동';
+  s.groups[0].members[1].full_name = '남궁민수';
+  s.teachers = [{ participant_id: 'pt_t1', full_name: '이선생', campus: '임동', group_id: 'G01' }];
+  s.staff = [{ participant_id: 'pt_s1', full_name: '박스탭', campus: '수완', group_id: null }];
+  return s;
+}
+assert.deepStrictEqual(Core.validateInternalSnapshot(validInternalSnapshot(), []), []);
+// 내부는 full_name(실명) 노출이 정상 → PUBLIC_FULL_NAME_LEAK 없음
+assert.ok(!ruleCodes(Core.validateInternalSnapshot(validInternalSnapshot(), [])).includes('PUBLIC_FULL_NAME_LEAK'));
+// teachers 누락 → 필수 필드 누락
+const internalMissing = validInternalSnapshot(); delete internalMissing.teachers;
+assert.ok(ruleCodes(Core.validateInternalSnapshot(internalMissing, [])).includes('PUBLIC_REQUIRED_FIELD_MISSING'));
+// teachers 허용 외 필드 거부
+const internalExtra = validInternalSnapshot(); internalExtra.teachers[0].note = '비고';
+assert.ok(ruleCodes(Core.validateInternalSnapshot(internalExtra, [])).includes('PUBLIC_FIELD_NOT_ALLOWED'));
+// 공개 검증기는 full_name/teachers를 거부(내부 전용 필드)
+assert.ok(ruleCodes(Core.validatePublicSnapshot(validInternalSnapshot(), [])).includes('PUBLIC_FIELD_NOT_ALLOWED'));
+
 console.log('Core tests passed');
