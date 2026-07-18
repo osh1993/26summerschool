@@ -1,6 +1,8 @@
 "use strict";
 
-const EXPECTED_SCHEMA = "public-snapshot/v1";
+const SUPPORTED_SCHEMAS = ["public-snapshot/v1", "public-snapshot/v2"];
+const INTERNAL_SCHEMA = "internal-snapshot/v1";
+const INTERNAL_SESSION_KEY = "camp.internal.snapshot";
 const FALLBACK_SOURCES = [
   { key: "latest", url: "data/latest.json" },
   { key: "sample", url: "data/sample.json" }
@@ -16,6 +18,10 @@ const state = {
   },
   groups: {
     query: ""
+  },
+  internal: {
+    snapshot: null,
+    source: null
   }
 };
 
@@ -36,7 +42,8 @@ const boardingStatusLabels = {
 
 const roleLabels = {
   leader: "조장",
-  assistant: "도우미",
+  sub_leader: "부조장",
+  teacher: "조선생님",
   member: "조원"
 };
 
@@ -50,6 +57,7 @@ document.addEventListener("DOMContentLoaded", init);
 async function init() {
   bindTabs();
   bindFilters();
+  bindInternal();
 
   try {
     const loaded = await loadSnapshot();
@@ -167,7 +175,7 @@ function validateSnapshot(snapshot) {
   if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) {
     throw new Error("JSON 객체가 아닙니다");
   }
-  if (snapshot.schema_version !== EXPECTED_SCHEMA) {
+  if (!SUPPORTED_SCHEMAS.includes(snapshot.schema_version)) {
     throw new Error(`지원하지 않는 스키마: ${snapshot.schema_version || "없음"}`);
   }
 
@@ -181,6 +189,11 @@ function validateSnapshot(snapshot) {
   ["notices", "groups", "vehicles", "trips", "unassigned_summary"].forEach((key) => {
     if (!Array.isArray(snapshot[key])) throw new Error(`배열 필드 누락: ${key}`);
   });
+
+  // v2는 time_slots(세션 정의)가 필수. v1은 없어도 통과(하위호환).
+  if (snapshot.schema_version === "public-snapshot/v2" && !Array.isArray(snapshot.time_slots)) {
+    throw new Error("배열 필드 누락: time_slots");
+  }
 
   if (!snapshot.event || snapshot.event.timezone !== "Asia/Seoul") {
     throw new Error("행사 시간대가 올바르지 않습니다");
@@ -334,30 +347,93 @@ function createTripCard(trip) {
   return card;
 }
 
-function renderGroups() {
-  if (!state.snapshot) return;
-  const list = document.getElementById("group-list");
-  const empty = document.getElementById("group-empty");
-  const filtered = state.snapshot.groups.filter((group) => matchesGroupSearch(group, state.groups.query));
-
-  clearNode(list);
-  filtered.forEach((group) => list.append(createGroupCard(group)));
-  empty.hidden = filtered.length > 0;
-  document.getElementById("group-count").textContent = `${filtered.length}개 조`;
+function timeSlots(snapshot) {
+  return Array.isArray(snapshot?.time_slots) ? snapshot.time_slots : [];
 }
 
-function createGroupCard(group) {
-  const card = element("article", "group-card");
-  card.style.setProperty("--group-color", safeColor(group.color));
-  const header = element("header", "group-card-header");
-  appendTextElement(header, "h3", group.display_name || group.group_id);
-  appendTextElement(header, "span", `${group.members.length}명`, "group-size");
-  card.append(header);
+// time_slots 라벨을 열 머리글로 채운다(세션 컬럼 하나에 7세션 표기).
+function renderSessionHeader(headId, snapshot) {
+  const head = document.getElementById(headId);
+  if (!head) return;
+  const slots = timeSlots(snapshot);
+  clearNode(head);
+  head.append(document.createTextNode("세션"));
+  if (!slots.length) return;
+  appendTextElement(head, "span", ` (${slots.length}세션)`, "th-note");
+}
 
-  const members = element("ul", "member-list");
-  group.members.forEach((member) => members.append(createPersonRow(member, "role")));
-  card.append(members);
-  return card;
+// 참가자 한 명의 7세션 참석을 텍스트+아이콘으로 렌더(색상만으로 구분하지 않음).
+function createSessionCell(snapshot, sessionSlots) {
+  const cell = element("td", "session-cell");
+  const slots = timeSlots(snapshot);
+  const present = new Set(Array.isArray(sessionSlots) ? sessionSlots.map(String) : []);
+  if (!slots.length) {
+    appendTextElement(cell, "span", "세션 정보 없음", "sess-none");
+    return cell;
+  }
+  const wrap = element("div", "session-grid");
+  slots.forEach((slot) => {
+    const isPresent = present.has(String(slot.slot_id));
+    const chip = element("span", "sess-cell");
+    chip.dataset.present = String(isPresent);
+    const shortLabel = slot.label || slot.slot_id;
+    chip.setAttribute("aria-label", `${shortLabel} ${isPresent ? "참석" : "불참"}`);
+    chip.title = `${shortLabel} ${isPresent ? "참석" : "불참"}`;
+    appendTextElement(chip, "span", isPresent ? "✓" : "–", "sess-icon");
+    appendTextElement(chip, "span", shortLabel, "sess-label");
+    wrap.append(chip);
+  });
+  cell.append(wrap);
+  return cell;
+}
+
+function roleBadge(role) {
+  const badge = element("span", "role-badge");
+  badge.dataset.role = role || "member";
+  badge.textContent = roleLabels[role] || role || "조원";
+  return badge;
+}
+
+function renderGroups() {
+  if (!state.snapshot) return;
+  const body = document.getElementById("group-table-body");
+  const empty = document.getElementById("group-empty");
+  const table = document.getElementById("group-table");
+  const filtered = state.snapshot.groups.filter((group) => matchesGroupSearch(group, state.groups.query));
+
+  renderSessionHeader("group-session-head", state.snapshot);
+  clearNode(body);
+  let memberCount = 0;
+  filtered.forEach((group) => {
+    group.members.forEach((member) => {
+      memberCount += 1;
+      const row = document.createElement("tr");
+      const groupCell = element("td", "group-cell");
+      const dot = element("span", "group-dot");
+      dot.style.setProperty("--group-color", safeColor(group.color));
+      groupCell.append(dot);
+      appendTextElement(groupCell, "span", group.display_name || group.group_id);
+      row.append(groupCell);
+
+      const nameCell = element("td", "name-cell");
+      appendTextElement(nameCell, "span", member.public_name || member.public_id, "public-code");
+      appendTextElement(nameCell, "span", member.public_id, "code-sub");
+      row.append(nameCell);
+
+      const roleCell = document.createElement("td");
+      roleCell.append(roleBadge(member.role));
+      row.append(roleCell);
+
+      appendTextElement(row, "td", member.campus || "-");
+      row.append(createSessionCell(state.snapshot, member.session_slots));
+      body.append(row);
+    });
+  });
+
+  const hasRows = memberCount > 0;
+  table.hidden = !hasRows;
+  empty.hidden = hasRows;
+  document.getElementById("group-count").textContent = `${filtered.length}개 조 · ${memberCount}명`;
 }
 
 function createPersonRow(person, mode) {
@@ -401,7 +477,8 @@ function renderFooter() {
 
 function renderFatalError() {
   document.getElementById("trip-list").replaceChildren();
-  document.getElementById("group-list").replaceChildren();
+  document.getElementById("group-table-body").replaceChildren();
+  document.getElementById("group-table").hidden = true;
   document.getElementById("trip-empty").hidden = false;
   document.getElementById("group-empty").hidden = false;
   document.getElementById("trip-count").textContent = "0개 운행";
@@ -508,4 +585,178 @@ function appendTextElement(parent, tagName, text, className = "") {
 
 function clearNode(node) {
   node.replaceChildren();
+}
+
+/* ── 인증 내부 뷰 ──────────────────────────────────────────────
+   공용 ID/PW를 Apps Script(doPost)로 보내 서버 검증 후에만 전체 이름을 받는다.
+   자격증명은 저장하지 않고, 응답(내부 스냅샷)만 sessionStorage에 임시 보관한다. */
+function bindInternal() {
+  const form = document.getElementById("internal-form");
+  const logout = document.getElementById("internal-logout");
+  if (form) form.addEventListener("submit", submitInternal);
+  if (logout) logout.addEventListener("click", logoutInternal);
+  restoreInternal();
+}
+
+function restoreInternal() {
+  try {
+    const raw = sessionStorage.getItem(INTERNAL_SESSION_KEY);
+    if (!raw) return;
+    const snapshot = JSON.parse(raw);
+    if (snapshot && snapshot.schema_version === INTERNAL_SCHEMA) {
+      state.internal.snapshot = snapshot;
+      state.internal.source = "session";
+      showInternalView(true);
+      renderInternal();
+    }
+  } catch (error) {
+    sessionStorage.removeItem(INTERNAL_SESSION_KEY);
+  }
+}
+
+async function submitInternal(event) {
+  event.preventDefault();
+  const userInput = document.getElementById("internal-user");
+  const passwordInput = document.getElementById("internal-password");
+  const submit = document.getElementById("internal-submit");
+  const user = String(userInput.value || "").trim();
+  const password = String(passwordInput.value || "");
+  const apiUrl = String(window.CAMP_CONFIG?.internalApiUrl || "").trim();
+
+  setInternalMessage("", false);
+  submit.disabled = true;
+  submit.textContent = "확인 중…";
+
+  try {
+    let snapshot;
+    if (apiUrl) {
+      snapshot = await postInternal(apiUrl, user, password);
+      if (!snapshot || snapshot.error || snapshot.schema_version !== INTERNAL_SCHEMA) {
+        setInternalMessage("아이디 또는 비밀번호가 올바르지 않습니다.", true);
+        return;
+      }
+      state.internal.source = "live";
+    } else {
+      // 내부 API 미설정: 합성 내부 샘플로 화면을 시연한다(실데이터 아님).
+      snapshot = await fetchSnapshot("data/sample-internal.json");
+      if (!snapshot || snapshot.schema_version !== INTERNAL_SCHEMA) {
+        setInternalMessage("내부 API가 설정되지 않았고 샘플도 불러오지 못했습니다.", true);
+        return;
+      }
+      state.internal.source = "sample";
+    }
+
+    state.internal.snapshot = snapshot;
+    try { sessionStorage.setItem(INTERNAL_SESSION_KEY, JSON.stringify(snapshot)); } catch (storeError) { /* 저장 실패는 화면 표시에 영향 없음 */ }
+    showInternalView(true);
+    renderInternal();
+  } catch (error) {
+    setInternalMessage("내부 명단을 불러오지 못했습니다. 잠시 뒤 다시 시도해 주세요.", true);
+  } finally {
+    // 비밀번호는 화면/메모리에 남기지 않는다.
+    passwordInput.value = "";
+    submit.disabled = false;
+    submit.innerHTML = '<span aria-hidden="true">🔓</span> 내부 명단 열기';
+  }
+}
+
+async function postInternal(apiUrl, user, password) {
+  // text/plain로 보내 CORS preflight를 피한다. Apps Script는 e.postData.contents를 JSON.parse한다.
+  const response = await fetch(apiUrl, {
+    method: "POST",
+    redirect: "follow",
+    headers: { "Content-Type": "text/plain;charset=utf-8" },
+    body: JSON.stringify({ user, password })
+  });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}
+
+function logoutInternal() {
+  sessionStorage.removeItem(INTERNAL_SESSION_KEY);
+  state.internal.snapshot = null;
+  state.internal.source = null;
+  clearNode(document.getElementById("internal-table-body"));
+  clearNode(document.getElementById("teachers-table-body"));
+  clearNode(document.getElementById("staff-table-body"));
+  showInternalView(false);
+  setInternalMessage("로그아웃되었습니다.", false);
+}
+
+function showInternalView(loggedIn) {
+  document.getElementById("internal-login").hidden = loggedIn;
+  document.getElementById("internal-view").hidden = !loggedIn;
+}
+
+function setInternalMessage(text, isError) {
+  const node = document.getElementById("internal-message");
+  node.textContent = text;
+  node.dataset.tone = isError ? "error" : "info";
+  node.hidden = !text;
+}
+
+function renderInternal() {
+  const snapshot = state.internal.snapshot;
+  if (!snapshot) return;
+
+  const statusText = {
+    live: "실시간 내부 명단",
+    sample: "샘플 내부 명단 (실데이터 아님)",
+    session: "저장된 내부 명단"
+  }[state.internal.source] || "내부 명단";
+  document.getElementById("internal-status").textContent = statusText;
+
+  renderSessionHeader("internal-session-head", snapshot);
+
+  const body = document.getElementById("internal-table-body");
+  clearNode(body);
+  (snapshot.groups || []).forEach((group) => {
+    (group.members || []).forEach((member) => {
+      const row = document.createElement("tr");
+      const groupCell = element("td", "group-cell");
+      const dot = element("span", "group-dot");
+      dot.style.setProperty("--group-color", safeColor(group.color));
+      groupCell.append(dot);
+      appendTextElement(groupCell, "span", group.display_name || group.group_id);
+      row.append(groupCell);
+
+      appendTextElement(row, "td", member.full_name || member.public_name || "-", "full-name");
+      appendTextElement(row, "td", member.public_id || "-", "code-sub");
+      const roleCell = document.createElement("td");
+      roleCell.append(roleBadge(member.role));
+      row.append(roleCell);
+      appendTextElement(row, "td", member.campus || "-");
+      row.append(createSessionCell(snapshot, member.session_slots));
+      body.append(row);
+    });
+  });
+
+  renderDirectory("teachers-table-body", snapshot.teachers, snapshot.groups);
+  renderDirectory("staff-table-body", snapshot.staff, snapshot.groups);
+}
+
+function renderDirectory(bodyId, people, groups) {
+  const body = document.getElementById(bodyId);
+  clearNode(body);
+  const groupNames = {};
+  (groups || []).forEach((group) => { groupNames[group.group_id] = group.display_name || group.group_id; });
+
+  if (!Array.isArray(people) || !people.length) {
+    const row = document.createElement("tr");
+    const cell = document.createElement("td");
+    cell.colSpan = 3;
+    cell.className = "empty-cell";
+    cell.textContent = "등록된 인원이 없습니다.";
+    row.append(cell);
+    body.append(row);
+    return;
+  }
+
+  people.forEach((person) => {
+    const row = document.createElement("tr");
+    appendTextElement(row, "td", person.full_name || "-", "full-name");
+    appendTextElement(row, "td", person.campus || "-");
+    appendTextElement(row, "td", person.group_id ? (groupNames[person.group_id] || person.group_id) : "미배정");
+    body.append(row);
+  });
 }

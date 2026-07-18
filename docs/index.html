@@ -47,6 +47,9 @@
       <button id="tab-groups" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="panel-groups" data-tab="groups" tabindex="-1">
         <span aria-hidden="true">👥</span> 조편성
       </button>
+      <button id="tab-internal" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="panel-internal" data-tab="internal" tabindex="-1">
+        <span aria-hidden="true">🔒</span> 내부 명단
+      </button>
     </nav>
 
     <section id="panel-trips" class="tab-panel" role="tabpanel" aria-labelledby="tab-trips">
@@ -110,11 +113,105 @@
         </label>
       </div>
 
-      <div id="group-list" class="group-grid" aria-live="polite"></div>
+      <p class="session-legend">세션 표기: <span class="sess-cell" data-present="true"><span aria-hidden="true">✓</span> 참석</span> <span class="sess-cell" data-present="false"><span aria-hidden="true">–</span> 불참</span></p>
+
+      <div class="table-scroll" aria-live="polite">
+        <table id="group-table" class="roster-table">
+          <caption class="sr-only">조편성 명단: 조, 이름·코드, 역할, 캠퍼스, 세션 참석</caption>
+          <thead>
+            <tr>
+              <th scope="col">조</th>
+              <th scope="col">이름 · 코드</th>
+              <th scope="col">역할</th>
+              <th scope="col">캠퍼스</th>
+              <th scope="col" id="group-session-head">세션</th>
+            </tr>
+          </thead>
+          <tbody id="group-table-body"></tbody>
+        </table>
+      </div>
       <div id="group-empty" class="empty-state" hidden>
         <span aria-hidden="true">🔎</span>
         <h3>검색 결과가 없습니다</h3>
         <p>전달받은 참가자 코드를 다시 확인해 주세요.</p>
+      </div>
+    </section>
+
+    <section id="panel-internal" class="tab-panel" role="tabpanel" aria-labelledby="tab-internal" hidden>
+      <div class="section-heading">
+        <div>
+          <p class="section-kicker">인증 후 전체 이름 표시</p>
+          <h2>내부 명단</h2>
+        </div>
+      </div>
+
+      <div id="internal-login" class="internal-login">
+        <p class="internal-intro">교역자·교사용 화면입니다. 전달받은 <strong>공용 아이디와 비밀번호</strong>를 입력하세요. 개인정보는 화면에만 표시되며 저장·공유되지 않습니다.</p>
+        <form id="internal-form" class="internal-form" autocomplete="off">
+          <label class="field field-wide">
+            <span>공용 아이디</span>
+            <input id="internal-user" type="text" name="user" inputmode="text" autocomplete="off" required>
+          </label>
+          <label class="field field-wide">
+            <span>비밀번호</span>
+            <input id="internal-password" type="password" name="password" autocomplete="off" required>
+          </label>
+          <button id="internal-submit" class="internal-submit" type="submit">
+            <span aria-hidden="true">🔓</span> 내부 명단 열기
+          </button>
+        </form>
+        <p id="internal-message" class="internal-message" role="alert" aria-live="assertive" hidden></p>
+      </div>
+
+      <div id="internal-view" hidden>
+        <div class="internal-toolbar">
+          <span id="internal-status" class="count-badge"></span>
+          <button id="internal-logout" class="internal-logout" type="button">
+            <span aria-hidden="true">🚪</span> 로그아웃
+          </button>
+        </div>
+
+        <p class="session-legend">세션 표기: <span class="sess-cell" data-present="true"><span aria-hidden="true">✓</span> 참석</span> <span class="sess-cell" data-present="false"><span aria-hidden="true">–</span> 불참</span></p>
+
+        <h3 class="internal-subhead">조 명단 (전체 이름)</h3>
+        <div class="table-scroll">
+          <table class="roster-table">
+            <caption class="sr-only">내부 조 명단: 조, 전체 이름, 코드, 역할, 캠퍼스, 세션</caption>
+            <thead>
+              <tr>
+                <th scope="col">조</th>
+                <th scope="col">이름</th>
+                <th scope="col">코드</th>
+                <th scope="col">역할</th>
+                <th scope="col">캠퍼스</th>
+                <th scope="col" id="internal-session-head">세션</th>
+              </tr>
+            </thead>
+            <tbody id="internal-table-body"></tbody>
+          </table>
+        </div>
+
+        <h3 class="internal-subhead">교사</h3>
+        <div class="table-scroll">
+          <table class="roster-table">
+            <caption class="sr-only">교사 명단: 이름, 캠퍼스, 담당 조</caption>
+            <thead>
+              <tr><th scope="col">이름</th><th scope="col">캠퍼스</th><th scope="col">담당 조</th></tr>
+            </thead>
+            <tbody id="teachers-table-body"></tbody>
+          </table>
+        </div>
+
+        <h3 class="internal-subhead">스탭</h3>
+        <div class="table-scroll">
+          <table class="roster-table">
+            <caption class="sr-only">스탭 명단: 이름, 캠퍼스, 담당 조</caption>
+            <thead>
+              <tr><th scope="col">이름</th><th scope="col">캠퍼스</th><th scope="col">담당 조</th></tr>
+            </thead>
+            <tbody id="staff-table-body"></tbody>
+          </table>
+        </div>
       </div>
     </section>
 

@@ -188,6 +188,7 @@ function normalizeRosterField_(field, value) {
     case 'grade_band': return (value === '' || value == null) ? '' : normalizeGradeBand_(value);
     case 'gender': return (value === '' || value == null) ? '' : normalizeGender_(value);
     case 'engagement_score': return (value === '' || value == null) ? '' : clamp_(asNumber_(value, 3), 1, 5);
+    case 'extraversion_score': return (value === '' || value == null) ? '' : clamp_(asNumber_(value, 3), 1, 5);
     case 'legal_name': return String(value == null ? '' : value).trim();
     default: return value == null ? '' : value; // 민감/불리언 필드는 원값 유지
   }
