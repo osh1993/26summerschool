@@ -1,0 +1,10 @@
+# clasp push에서 제외할 로컬 전용 파일(Apps Script에 올리지 않는다).
+# 실제 올릴 것: *.gs, Core.js, appsscript.json 뿐.
+**/README.md
+**/package.json
+**/*.md
+tests/**
+**/*.test.js
+.clasp.json
+.clasp.json.example
+.claspignore
