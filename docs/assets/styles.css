@@ -370,6 +370,45 @@ summary:focus-visible {
   color: #6635a5;
 }
 
+/* 시간 버킷 배지: 색상 단독 금지 원칙에 따라 아이콘+텍스트를 함께 표시한다. */
+.bucket-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 6px;
+  padding: 4px 9px;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 800;
+  white-space: nowrap;
+  background: #fff2dd;
+  color: #8a5300;
+  border: 1px solid #f0cf94;
+}
+
+.bucket-chip[data-bucket="morning"] {
+  background: #fff2dd;
+  color: #8a5300;
+  border-color: #f0cf94;
+}
+
+.bucket-chip[data-bucket="afternoon"] {
+  background: #e4f1ff;
+  color: #0b4f9c;
+  border-color: #b6d6f4;
+}
+
+.bucket-chip[data-bucket="night"] {
+  background: #ebeaff;
+  color: #453a8f;
+  border-color: #cbc6f0;
+}
+
+.bucket-icon {
+  font-size: 0.85em;
+  line-height: 1;
+}
+
 .status-chip {
   padding: 5px 9px;
   background: var(--mint);

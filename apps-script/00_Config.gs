@@ -3,10 +3,11 @@
  * 이 프로젝트에는 Spreadsheet ID, URL, 개인 식별값을 하드코딩하지 않는다.
  */
 var CAMP = Object.freeze({
-  // Phase 2: 방배정(rooms[]) 추가로 공개 v3 / 내부 v2로 bump.
-  // publisher(06_PublicApi.gs)가 이 값으로 스냅샷을 스탬프하므로, rooms[]·time_slots[]를 반드시 함께 조립해야 게시 검증을 통과한다.
-  SCHEMA_VERSION: 'public-snapshot/v3',
-  INTERNAL_SCHEMA_VERSION: 'internal-snapshot/v2',
+  // Phase 3: 차량 운행에 time_bucket(오전/오후/밤) 파생 표시 + 탑승자 성 마스킹으로 공개 v4 / 내부 v3로 bump.
+  // publisher(06_PublicApi.gs)가 이 값으로 스냅샷을 스탬프하므로, trips[].time_bucket과 성 마스킹된 passengers[].public_name을
+  // 반드시 함께 조립해야 게시 검증을 통과한다(rooms[]·time_slots[]도 v3부터 계속 필수).
+  SCHEMA_VERSION: 'public-snapshot/v4',
+  INTERNAL_SCHEMA_VERSION: 'internal-snapshot/v3',
   TIMEZONE: 'Asia/Seoul',
   PUBLIC_EXPORT_CHUNK_SIZE: 40000,
   SHEETS: Object.freeze({

@@ -79,6 +79,15 @@
             <option value="OUT">OUT · 광주로</option>
           </select>
         </label>
+        <label class="field">
+          <span>시간대</span>
+          <select id="bucket-filter">
+            <option value="all">전체 시간대</option>
+            <option value="morning">☀ 오전</option>
+            <option value="afternoon">⛅ 오후</option>
+            <option value="night">🌙 밤</option>
+          </select>
+        </label>
         <label class="field field-wide">
           <span>참가자 코드 검색</span>
           <input id="trip-search" type="search" inputmode="search" autocomplete="off" placeholder="예: A-01" aria-describedby="trip-search-help">
@@ -241,6 +250,23 @@
               </tr>
             </thead>
             <tbody id="internal-room-body"></tbody>
+          </table>
+        </div>
+
+        <h3 class="internal-subhead">차량 운행 (전체 이름)</h3>
+        <div class="table-scroll">
+          <table class="roster-table">
+            <caption class="sr-only">내부 차량 운행: 운행, 시간대, 방향, 차량, 탑승자 전체 이름</caption>
+            <thead>
+              <tr>
+                <th scope="col">운행</th>
+                <th scope="col">시간대</th>
+                <th scope="col">방향</th>
+                <th scope="col">차량</th>
+                <th scope="col">탑승자</th>
+              </tr>
+            </thead>
+            <tbody id="internal-trip-body"></tbody>
           </table>
         </div>
 

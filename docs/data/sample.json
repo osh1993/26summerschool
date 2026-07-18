@@ -1,5 +1,5 @@
 {
-  "schema_version": "public-snapshot/v3",
+  "schema_version": "public-snapshot/v4",
   "event": {
     "event_id": "sample-event",
     "name": "수련회 샘플",
@@ -140,20 +140,62 @@
     {
       "trip_id": "T-SAMPLE-01",
       "date": "2026-07-23",
+      "time": "08:30",
+      "time_bucket": "morning",
+      "direction": "IN",
+      "origin": "공개 집결지",
+      "destination": "수련회장",
+      "meeting_point": "공개 집결지",
+      "status": "confirmed",
+      "vehicle_id": "V-SAMPLE",
+      "driver_label": "샘플 차량 담당",
+      "capacity": 5,
+      "passenger_count": 2,
+      "remaining_seats": 2,
+      "passengers": [
+        { "public_id": "P-S01", "public_name": "김○○", "boarding_status": "confirmed" },
+        { "public_id": "P-S03", "public_name": "박○", "boarding_status": "confirmed" }
+      ],
+      "updated_at": "2026-07-16T09:00:00+09:00"
+    },
+    {
+      "trip_id": "T-SAMPLE-02",
+      "date": "2026-07-23",
       "time": "13:00",
+      "time_bucket": "afternoon",
       "direction": "IN",
       "origin": "공개 집결지",
       "destination": "수련회장",
       "meeting_point": "공개 집결지",
       "status": "open",
       "vehicle_id": "V-SAMPLE",
-      "driver_label": "운전자 S",
+      "driver_label": "샘플 차량 담당",
+      "capacity": 5,
+      "passenger_count": 1,
+      "remaining_seats": 3,
+      "passengers": [
+        { "public_id": "P-S02", "public_name": "이○○", "boarding_status": "planned" }
+      ],
+      "updated_at": "2026-07-16T09:00:00+09:00"
+    },
+    {
+      "trip_id": "T-SAMPLE-03",
+      "date": "2026-07-25",
+      "time": "20:00",
+      "time_bucket": "night",
+      "direction": "OUT",
+      "origin": "수련회장",
+      "destination": "공개 집결지",
+      "meeting_point": "수련회장 정문",
+      "status": "open",
+      "vehicle_id": "V-SAMPLE",
+      "driver_label": "샘플 차량 담당",
       "capacity": 5,
       "passenger_count": 2,
       "remaining_seats": 2,
       "passengers": [
-        { "public_id": "P-S01", "public_name": "김○○", "boarding_status": "confirmed" },
-        { "public_id": "P-S02", "public_name": "이○○", "boarding_status": "planned" }
+        { "public_id": "P-S05", "public_name": "최○○", "boarding_status": "planned" },
+        { "public_id": "P-S06", "public_name": "남궁○○", "boarding_status": "planned" }
       ],
       "updated_at": "2026-07-16T09:00:00+09:00"
     }

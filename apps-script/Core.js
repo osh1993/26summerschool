@@ -212,8 +212,11 @@ var CampCore = (function () {
     roomMemberInternal: ['full_name'],
     personDirectory: ['participant_id', 'full_name', 'campus', 'group_id'],
     vehicle: ['vehicle_id', 'label', 'capacity', 'accessibility'],
-    trip: ['trip_id', 'date', 'time', 'direction', 'origin', 'destination', 'meeting_point', 'status', 'vehicle_id', 'driver_label', 'capacity', 'passenger_count', 'remaining_seats', 'passengers', 'updated_at'],
+    // v4: time_bucket(오전/오후/밤 파생 배지) 추가. 기존 정밀 date/time과 병행 유지.
+    trip: ['trip_id', 'date', 'time', 'time_bucket', 'direction', 'origin', 'destination', 'meeting_point', 'status', 'vehicle_id', 'driver_label', 'capacity', 'passenger_count', 'remaining_seats', 'passengers', 'updated_at'],
+    // v4: 공개 탑승자 public_name = maskSurname(성 마스킹). full_name은 내부 스냅샷에서만 추가 허용.
     passenger: ['public_id', 'public_name', 'boarding_status'],
+    passengerInternal: ['full_name'],
     unassigned: ['trip_window_id', 'direction', 'count', 'reason_code'],
     validation: ['status', 'blocking_error_count', 'warning_count', 'warnings'],
     warning: ['rule_code', 'message', 'count']
@@ -223,8 +226,8 @@ var CampCore = (function () {
   var SESSION_PARTS = ['morning', 'afternoon', 'night'];
   var GENDER_SCOPES = ['male', 'female', 'mixed'];
   var ROOM_PERSON_TYPES = ['student', 'teacher', 'staff'];
-  var PUBLIC_SCHEMA_VERSIONS = ['public-snapshot/v1', 'public-snapshot/v2', 'public-snapshot/v3'];
-  var INTERNAL_SCHEMA_VERSIONS = ['internal-snapshot/v1', 'internal-snapshot/v2'];
+  var PUBLIC_SCHEMA_VERSIONS = ['public-snapshot/v1', 'public-snapshot/v2', 'public-snapshot/v3', 'public-snapshot/v4'];
+  var INTERNAL_SCHEMA_VERSIONS = ['internal-snapshot/v1', 'internal-snapshot/v2', 'internal-snapshot/v3'];
 
   function unknownKeys(object, allowed) {
     if (!object || typeof object !== 'object' || Array.isArray(object)) return ['<not-object>'];
@@ -282,6 +285,15 @@ var CampCore = (function () {
         }
       });
     });
+    // v4: 공개 차량 탑승자(trips[].passengers[])의 public_name도 실명 유입을 검사한다(차량 뷰 성 마스킹 강제).
+    (snapshot.trips || []).forEach(function (trip) {
+      ((trip && trip.passengers) || []).forEach(function (passenger) {
+        var display = String(passenger.public_name == null ? '' : passenger.public_name).trim();
+        if (display && names[display]) {
+          issues.push(issue('PUBLIC_FULL_NAME_LEAK', 'passenger', passenger.public_id, '공개 탑승자 표시명이 전체 실명과 동일합니다(성 마스킹 필요).'));
+        }
+      });
+    });
     return issues;
   }
 
@@ -289,7 +301,8 @@ var CampCore = (function () {
     return validateSnapshot_(snapshot, sensitiveValues, 'public', legalNames);
   }
 
-  // 내부 스냅샷(internal-snapshot/v1·v2) 검증. 공개 v2/v3 구조 + member.full_name + 최상위 teachers[]/staff[]. v2는 rooms[]에 full_name 허용.
+  // 내부 스냅샷(internal-snapshot/v1·v2·v3) 검증. 공개 v2/v3/v4 구조 + member.full_name + 최상위 teachers[]/staff[].
+  // v2는 rooms[]에 full_name 허용, v3는 추가로 trips[].passengers[]에 full_name 허용(차량 내부 뷰 실명 노출 정상).
   function validateInternalSnapshot(snapshot, sensitiveValues) {
     return validateSnapshot_(snapshot, sensitiveValues, 'internal', []);
   }
@@ -301,15 +314,17 @@ var CampCore = (function () {
     var version = snapshot.schema_version;
     var isPublicV2 = !isInternal && version === 'public-snapshot/v2';
     var isPublicV3 = !isInternal && version === 'public-snapshot/v3';
+    var isPublicV4 = !isInternal && version === 'public-snapshot/v4';
     var isInternalV2 = isInternal && version === 'internal-snapshot/v2';
+    var isInternalV3 = isInternal && version === 'internal-snapshot/v3';
     var rootAllowed = isInternal ? ALLOWED.root.concat(ALLOWED.rootInternal) : ALLOWED.root;
     var memberAllowed = isInternal ? ALLOWED.member.concat(ALLOWED.memberInternal) : ALLOWED.member;
 
     unknownKeys(snapshot, rootAllowed).forEach(function (key) { issues.push(issue('PUBLIC_FIELD_NOT_ALLOWED', 'snapshot', key, '허용되지 않은 최상위 키입니다.')); });
 
     var requiredRoot = ['schema_version', 'event', 'generated_at', 'updated_at', 'publish_id', 'notices', 'groups', 'vehicles', 'trips', 'unassigned_summary', 'validation'];
-    if (isPublicV2 || isPublicV3 || isInternal) requiredRoot = requiredRoot.concat('time_slots'); // v2 이상/내부는 세션 정의 필수
-    if (isPublicV3 || isInternalV2) requiredRoot = requiredRoot.concat('rooms'); // v3/내부v2는 방배정 필수
+    if (isPublicV2 || isPublicV3 || isPublicV4 || isInternal) requiredRoot = requiredRoot.concat('time_slots'); // v2 이상/내부는 세션 정의 필수
+    if (isPublicV3 || isPublicV4 || isInternalV2 || isInternalV3) requiredRoot = requiredRoot.concat('rooms'); // v3 이상/내부v2 이상은 방배정 필수
     if (isInternal) requiredRoot = requiredRoot.concat(['teachers', 'staff']);
     requiredRoot.forEach(function (key) {
       if (snapshot[key] == null) issues.push(issue('PUBLIC_REQUIRED_FIELD_MISSING', 'snapshot', key, '필수 스냅샷 필드가 없습니다.'));
@@ -375,7 +390,7 @@ var CampCore = (function () {
 
     // ── rooms[] (v3 공개 / v2 내부 신규 최상위) ──
     // 공개 뷰는 성 마스킹 표시명, 내부 뷰는 full_name 추가 허용. occupancy는 members 수와 일치해야 한다.
-    var expectRooms = isPublicV3 || isInternalV2 || snapshot.rooms != null;
+    var expectRooms = isPublicV3 || isPublicV4 || isInternalV2 || isInternalV3 || snapshot.rooms != null;
     if (expectRooms) {
       if (!Array.isArray(snapshot.rooms)) {
         issues.push(issue('PUBLIC_ARRAY_REQUIRED', 'snapshot', 'rooms'));
@@ -409,15 +424,21 @@ var CampCore = (function () {
     });
     var tripIds = {};
     var passengerTimes = {};
+    // v4/내부v3는 time_bucket(오전/오후/밤 파생 배지)을 필수로 요구한다. 하위 버전은 없어도 통과(파생 필드).
+    var requireBucket = isPublicV4 || isInternalV3;
+    var passengerAllowed = isInternal ? ALLOWED.passenger.concat(ALLOWED.passengerInternal) : ALLOWED.passenger;
     (snapshot.trips || []).forEach(function (trip) {
       unknownKeys(trip, ALLOWED.trip).forEach(function (key) { issues.push(issue('PUBLIC_FIELD_NOT_ALLOWED', 'trip', key)); });
       if (tripIds[trip.trip_id]) issues.push(issue('PUBLIC_DUPLICATE_ID', 'trip', trip.trip_id));
       tripIds[trip.trip_id] = true;
       if (!vehicleIds[trip.vehicle_id]) issues.push(issue('PUBLIC_REFERENCE_BROKEN', 'trip', trip.trip_id));
+      // time_bucket: 필수 여부(버전)와 무관하게 값이 있으면 enum(morning/afternoon/night)을 검증한다.
+      if (requireBucket && trip.time_bucket == null) issues.push(issue('PUBLIC_REQUIRED_FIELD_MISSING', 'trip', trip.trip_id, 'time_bucket가 없습니다.'));
+      if (trip.time_bucket != null && SESSION_PARTS.indexOf(String(trip.time_bucket)) < 0) issues.push(issue('PUBLIC_ENUM_INVALID', 'trip', trip.trip_id, 'time_bucket 값이 올바르지 않습니다.'));
       if (!Array.isArray(trip.passengers)) issues.push(issue('PUBLIC_ARRAY_REQUIRED', 'trip', trip.trip_id));
       var passengers = trip.passengers || [];
       passengers.forEach(function (passenger) {
-        unknownKeys(passenger, ALLOWED.passenger).forEach(function (key) { issues.push(issue('PUBLIC_FIELD_NOT_ALLOWED', 'passenger', key)); });
+        unknownKeys(passenger, passengerAllowed).forEach(function (key) { issues.push(issue('PUBLIC_FIELD_NOT_ALLOWED', 'passenger', key)); });
         var timeKey = String(trip.date) + 'T' + String(trip.time);
         var personKey = String(passenger.public_id) + '|' + timeKey;
         if (passengerTimes[personKey]) issues.push(issue('PUBLIC_PASSENGER_TIME_CONFLICT', 'participant', passenger.public_id));
@@ -1072,6 +1093,23 @@ var CampCore = (function () {
     return SESSION_PART_LABELS[String(part)] || '';
   }
 
+  // ── 차량 운행 시간 버킷(공개 표시용 파생) ──────────────────────────────
+  // 출발 ISO 시각의 로컬 벽시계 hour로 오전/오후/밤을 파생한다. 세션(part)과 동일 어휘라 라벨은 sessionPartLabel 재사용.
+  //   00:00–11:59 = morning(오전), 12:00–17:59 = afternoon(오후), 18:00–23:59 = night(밤)
+  // ISO에 오프셋(+09:00 등)이 있으면 그 오프셋 기준 로컬 시각(문자열에 적힌 hour)을 그대로 사용한다.
+  // 오프셋이 없으면 timezone(기본 Asia/Seoul) 벽시계로 간주한다 — 두 경우 모두 문자열에 적힌 hour가 로컬 시(時)이다.
+  function tripTimeBucket(iso, timezone) {
+    var text = String(iso == null ? '' : iso).trim();
+    if (!Number.isFinite(parseMillis(text))) return ''; // 파싱 불가한 시각은 버킷 없음
+    var match = text.match(/T(\d{2}):/); // ISO 날짜/시각 구분자 뒤의 시(hour) 토큰
+    if (!match) return '';
+    var hour = Number(match[1]);
+    if (!(hour >= 0 && hour <= 23)) return '';
+    if (hour < 12) return 'morning';
+    if (hour < 18) return 'afternoon';
+    return 'night';
+  }
+
   // 참가자의 present 세션 slot_id 배열을 산출한다. participantId가 주어지면 해당 참가자만 필터한다.
   function presentSlotIds(attendanceRows, participantId) {
     return (attendanceRows || []).filter(function (row) {
@@ -1122,6 +1160,7 @@ var CampCore = (function () {
     maskSurname: maskSurname,
     verifyInternalCredential: verifyInternalCredential,
     sessionPartLabel: sessionPartLabel,
+    tripTimeBucket: tripTimeBucket,
     presentSlotIds: presentSlotIds,
     buildStandardTimeSlots: buildStandardTimeSlots
   };
