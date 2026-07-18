@@ -577,4 +577,28 @@ assert.ok(ruleCodes(Core.validateInternalSnapshot(iv3NoBucket, [])).includes('PU
 // 공개 검증기는 내부 v3(탑승자 full_name/teachers)를 거부
 assert.ok(ruleCodes(Core.validatePublicSnapshot(validInternalV3Snapshot(), [])).includes('PUBLIC_FIELD_NOT_ALLOWED'));
 
+// ── 내부 식별자(pt_ UUID) 오탐 방지 vs 진짜 PII 차단 유지 ──────────────────
+// 내부 스냅샷은 teachers/staff participant_id에 pt_+UUID를 정당하게 가진다 → PUBLIC_FIELD_LEAK 오탐 금지.
+function internalWithRealIds() {
+  const s = validInternalV3Snapshot();
+  s.teachers = [{ participant_id: 'pt_9f3c1a2b4d5e6f7a8b9c0d1e', full_name: '이선생', campus: '임동', group_id: 'G01' }];
+  s.staff = [{ participant_id: 'pt_00112233445566778899aabb', full_name: '박스탭', campus: '수완', group_id: null }];
+  return s;
+}
+// 내부 검증기는 pt_ 내부 ID를 유출로 보지 않는다
+assert.ok(!ruleCodes(Core.validateInternalSnapshot(internalWithRealIds(), [])).includes('PUBLIC_FIELD_LEAK'));
+assert.deepStrictEqual(Core.validateInternalSnapshot(internalWithRealIds(), []), []);
+// 그러나 공개 검증기는 동일 pt_ 패턴을 여전히 유출로 차단(가드는 공개 전용으로 유지)
+const publicPtLeak = validV4Snapshot(); publicPtLeak.notices.push({ notice_id: 'N9', title: '안내', message: '문의: pt_9f3c1a2b4d5e6f7a8b9c0d1e', severity: 'info' });
+assert.ok(ruleCodes(Core.validatePublicSnapshot(publicPtLeak, [])).includes('PUBLIC_FIELD_LEAK'));
+// 진짜 PII(전화번호)는 내부 스냅샷에서도 여전히 차단
+const internalPhone = internalWithRealIds(); internalPhone.notices.push({ notice_id: 'N8', title: '연락', message: '010-1234-5678', severity: 'info' });
+assert.ok(ruleCodes(Core.validateInternalSnapshot(internalPhone, [])).includes('PUBLIC_FIELD_LEAK'));
+// 진짜 PII(이메일)도 내부에서 차단
+const internalEmail = internalWithRealIds(); internalEmail.notices.push({ notice_id: 'N7', title: '메일', message: 'a@b.com', severity: 'info' });
+assert.ok(ruleCodes(Core.validateInternalSnapshot(internalEmail, [])).includes('PUBLIC_FIELD_LEAK'));
+// sensitiveValues(주입 비밀값) 스캔은 내부에서도 유지
+const internalCanary = internalWithRealIds(); internalCanary.notices.push({ notice_id: 'N6', title: '안내', message: 'PRIVATE-CANARY', severity: 'info' });
+assert.ok(ruleCodes(Core.validateInternalSnapshot(internalCanary, ['PRIVATE-CANARY'])).includes('PUBLIC_FIELD_LEAK'));
+
 console.log('Core tests passed');

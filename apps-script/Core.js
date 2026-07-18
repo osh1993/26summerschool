@@ -234,27 +234,34 @@ var CampCore = (function () {
     return Object.keys(object).filter(function (key) { return allowed.indexOf(key) < 0; });
   }
 
-  function scanPublicStrings(value, path, sensitiveValues, issues) {
+  // 진짜 PII(전화·이메일·차량번호판) 패턴: 공개/내부 스냅샷 모두 유입 금지.
+  var PII_LEAK_PATTERNS = [
+    /(?:\+82[\s-]?)?0?10[\s-]?\d{3,4}[\s-]?\d{4}/,
+    /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i,
+    /\b\d{2,3}[가-힣]\s?\d{4}\b/
+  ];
+  // 내부 식별자(내부 participant_id·시트 URL) 패턴: 공개 스냅샷 전용 가드.
+  // 내부 스냅샷은 teachers[]/staff[].participant_id 등에 pt_+UUID를 정당하게 가지므로 내부 검증에서는 건너뛴다.
+  var INTERNAL_ID_LEAK_PATTERNS = [
+    /\bpt_[A-Za-z0-9_-]{5,}\b/,
+    /\/spreadsheets\/d\/[A-Za-z0-9_-]+/
+  ];
+
+  function scanPublicStrings(value, path, sensitiveValues, issues, isInternal) {
     if (typeof value === 'string') {
-      var patterns = [
-        /(?:\+82[\s-]?)?0?10[\s-]?\d{3,4}[\s-]?\d{4}/,
-        /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i,
-        /\bpt_[A-Za-z0-9_-]{5,}\b/,
-        /\/spreadsheets\/d\/[A-Za-z0-9_-]+/,
-        /\b\d{2,3}[가-힣]\s?\d{4}\b/
-      ];
+      var patterns = isInternal ? PII_LEAK_PATTERNS : PII_LEAK_PATTERNS.concat(INTERNAL_ID_LEAK_PATTERNS);
       if (patterns.some(function (pattern) { return pattern.test(value); })) {
-        issues.push(issue('PUBLIC_FIELD_LEAK', 'public_json', path, '공개 문자열에서 민감정보 패턴이 탐지되었습니다.'));
+        issues.push(issue('PUBLIC_FIELD_LEAK', 'public_json', path, '스냅샷 문자열에서 민감정보 패턴이 탐지되었습니다.'));
       }
       (sensitiveValues || []).filter(Boolean).forEach(function (secret) {
         if (String(secret).length >= 4 && value.indexOf(String(secret)) >= 0) {
-          issues.push(issue('PUBLIC_FIELD_LEAK', 'public_json', path, '내부 민감값이 공개 문자열에 포함되었습니다.'));
+          issues.push(issue('PUBLIC_FIELD_LEAK', 'public_json', path, '내부 민감값이 스냅샷 문자열에 포함되었습니다.'));
         }
       });
     } else if (Array.isArray(value)) {
-      value.forEach(function (item, index) { scanPublicStrings(item, path + '[' + index + ']', sensitiveValues, issues); });
+      value.forEach(function (item, index) { scanPublicStrings(item, path + '[' + index + ']', sensitiveValues, issues, isInternal); });
     } else if (value && typeof value === 'object') {
-      Object.keys(value).forEach(function (key) { scanPublicStrings(value[key], path + '.' + key, sensitiveValues, issues); });
+      Object.keys(value).forEach(function (key) { scanPublicStrings(value[key], path + '.' + key, sensitiveValues, issues, isInternal); });
     }
   }
 
@@ -471,7 +478,7 @@ var CampCore = (function () {
         issues.push(issue('PUBLIC_VALIDATION_STATUS_INVALID', 'validation', 'status'));
       }
     }
-    scanPublicStrings(snapshot, '$', sensitiveValues || [], issues);
+    scanPublicStrings(snapshot, '$', sensitiveValues || [], issues, isInternal);
     // 공개 불변조건: 표시명이 전체 실명과 같으면 실패(내부 스냅샷은 full_name 정상 노출이므로 제외).
     if (!isInternal) issues = issues.concat(assertNoFullNames(snapshot, legalNames || []));
     return issues;

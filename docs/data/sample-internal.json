@@ -9,16 +9,58 @@
   },
   "generated_at": "2026-07-16T09:00:00+09:00",
   "updated_at": "2026-07-16T09:00:00+09:00",
-  "publish_id": "internal-sample-002",
-  "notices": [],
+  "publish_id": "sample-002-internal",
+  "notices": [
+    {
+      "notice_id": "N-SAMPLE",
+      "title": "샘플 화면",
+      "message": "실제 Google 공시가 연결되지 않아 합성 샘플을 표시하고 있습니다.",
+      "severity": "urgent"
+    }
+  ],
   "time_slots": [
-    { "slot_id": "S_D1_MORNING", "label": "1일차 오전", "day_index": 1, "part": "morning" },
-    { "slot_id": "S_D1_AFTERNOON", "label": "1일차 오후", "day_index": 1, "part": "afternoon" },
-    { "slot_id": "S_D1_NIGHT", "label": "1일차 밤", "day_index": 1, "part": "night" },
-    { "slot_id": "S_D2_MORNING", "label": "2일차 오전", "day_index": 2, "part": "morning" },
-    { "slot_id": "S_D2_AFTERNOON", "label": "2일차 오후", "day_index": 2, "part": "afternoon" },
-    { "slot_id": "S_D2_NIGHT", "label": "2일차 밤", "day_index": 2, "part": "night" },
-    { "slot_id": "S_D3_MORNING", "label": "3일차 오전", "day_index": 3, "part": "morning" }
+    {
+      "slot_id": "S_D1_MORNING",
+      "label": "1일차 오전",
+      "day_index": 1,
+      "part": "morning"
+    },
+    {
+      "slot_id": "S_D1_AFTERNOON",
+      "label": "1일차 오후",
+      "day_index": 1,
+      "part": "afternoon"
+    },
+    {
+      "slot_id": "S_D1_NIGHT",
+      "label": "1일차 밤",
+      "day_index": 1,
+      "part": "night"
+    },
+    {
+      "slot_id": "S_D2_MORNING",
+      "label": "2일차 오전",
+      "day_index": 2,
+      "part": "morning"
+    },
+    {
+      "slot_id": "S_D2_AFTERNOON",
+      "label": "2일차 오후",
+      "day_index": 2,
+      "part": "afternoon"
+    },
+    {
+      "slot_id": "S_D2_NIGHT",
+      "label": "2일차 밤",
+      "day_index": 2,
+      "part": "night"
+    },
+    {
+      "slot_id": "S_D3_MORNING",
+      "label": "3일차 오전",
+      "day_index": 3,
+      "part": "morning"
+    }
   ],
   "rooms": [
     {
@@ -29,8 +71,20 @@
       "capacity": 4,
       "occupancy": 2,
       "members": [
-        { "public_id": "P-S01", "public_name": "김○○", "full_name": "김하늘", "person_type": "student", "campus": "임동" },
-        { "public_id": "P-S03", "public_name": "박○", "full_name": "박솔", "person_type": "student", "campus": "임동" }
+        {
+          "public_id": "P-S01",
+          "public_name": "김○○",
+          "person_type": "student",
+          "campus": "임동",
+          "full_name": "김가나"
+        },
+        {
+          "public_id": "P-S03",
+          "public_name": "박○",
+          "person_type": "student",
+          "campus": "임동",
+          "full_name": "박민"
+        }
       ]
     },
     {
@@ -39,10 +93,29 @@
       "floor": "2",
       "gender_scope": "female",
       "capacity": 4,
-      "occupancy": 2,
+      "occupancy": 3,
       "members": [
-        { "public_id": "P-S02", "public_name": "이○○", "full_name": "이바다", "person_type": "student", "campus": "수완" },
-        { "public_id": "P-S05", "public_name": "최○○", "full_name": "최가람", "person_type": "student", "campus": "임동" }
+        {
+          "public_id": "P-S02",
+          "public_name": "이○○",
+          "person_type": "student",
+          "campus": "수완",
+          "full_name": "이다라"
+        },
+        {
+          "public_id": "P-S05",
+          "public_name": "최○○",
+          "person_type": "student",
+          "campus": "임동",
+          "full_name": "최지은"
+        },
+        {
+          "public_id": "P-S99",
+          "public_name": "한○○",
+          "full_name": "한겨울",
+          "person_type": "student",
+          "campus": "수완"
+        }
       ]
     },
     {
@@ -53,7 +126,13 @@
       "capacity": 4,
       "occupancy": 1,
       "members": [
-        { "public_id": "P-S06", "public_name": "남궁○○", "full_name": "남궁도훈", "person_type": "student", "campus": "기타" }
+        {
+          "public_id": "P-S06",
+          "public_name": "남궁○○",
+          "person_type": "student",
+          "campus": "기타",
+          "full_name": "남궁서준"
+        }
       ]
     },
     {
@@ -64,7 +143,13 @@
       "capacity": 2,
       "occupancy": 1,
       "members": [
-        { "public_id": "P-S04", "public_name": "정○○", "full_name": "정도움", "person_type": "teacher", "campus": "수완" }
+        {
+          "public_id": "P-S04",
+          "public_name": "정○○",
+          "person_type": "teacher",
+          "campus": "수완",
+          "full_name": "정수현"
+        }
       ]
     }
   ],
@@ -77,26 +162,46 @@
         {
           "public_id": "P-S01",
           "public_name": "김○○",
-          "full_name": "김하늘",
           "role": "leader",
           "campus": "임동",
-          "session_slots": ["S_D1_MORNING", "S_D1_AFTERNOON", "S_D1_NIGHT", "S_D2_MORNING", "S_D2_AFTERNOON", "S_D2_NIGHT", "S_D3_MORNING"]
+          "session_slots": [
+            "S_D1_MORNING",
+            "S_D1_AFTERNOON",
+            "S_D1_NIGHT",
+            "S_D2_MORNING",
+            "S_D2_AFTERNOON",
+            "S_D2_NIGHT",
+            "S_D3_MORNING"
+          ],
+          "full_name": "김가나"
         },
         {
           "public_id": "P-S02",
           "public_name": "이○○",
-          "full_name": "이바다",
           "role": "sub_leader",
           "campus": "수완",
-          "session_slots": ["S_D1_AFTERNOON", "S_D1_NIGHT", "S_D2_MORNING", "S_D2_AFTERNOON", "S_D2_NIGHT", "S_D3_MORNING"]
+          "session_slots": [
+            "S_D1_AFTERNOON",
+            "S_D1_NIGHT",
+            "S_D2_MORNING",
+            "S_D2_AFTERNOON",
+            "S_D2_NIGHT",
+            "S_D3_MORNING"
+          ],
+          "full_name": "이다라"
         },
         {
           "public_id": "P-S03",
           "public_name": "박○",
-          "full_name": "박솔",
           "role": "member",
           "campus": "임동",
-          "session_slots": ["S_D1_MORNING", "S_D1_AFTERNOON", "S_D1_NIGHT", "S_D2_MORNING"]
+          "session_slots": [
+            "S_D1_MORNING",
+            "S_D1_AFTERNOON",
+            "S_D1_NIGHT",
+            "S_D2_MORNING"
+          ],
+          "full_name": "박민"
         }
       ]
     },
@@ -106,18 +211,64 @@
       "color": "#146C43",
       "members": [
         {
+          "public_id": "P-S04",
+          "public_name": "정○○",
+          "role": "teacher",
+          "campus": "수완",
+          "session_slots": [
+            "S_D1_MORNING",
+            "S_D1_AFTERNOON",
+            "S_D1_NIGHT",
+            "S_D2_MORNING",
+            "S_D2_AFTERNOON",
+            "S_D2_NIGHT",
+            "S_D3_MORNING"
+          ],
+          "full_name": "정수현"
+        },
+        {
           "public_id": "P-S05",
           "public_name": "최○○",
-          "full_name": "최가람",
           "role": "member",
           "campus": "임동",
-          "session_slots": ["S_D2_MORNING", "S_D2_AFTERNOON", "S_D2_NIGHT", "S_D3_MORNING"]
+          "session_slots": [
+            "S_D2_MORNING",
+            "S_D2_AFTERNOON",
+            "S_D2_NIGHT",
+            "S_D3_MORNING"
+          ],
+          "full_name": "최지은"
+        },
+        {
+          "public_id": "P-S06",
+          "public_name": "남궁○○",
+          "role": "member",
+          "campus": "기타",
+          "session_slots": [],
+          "full_name": "남궁서준"
+        },
+        {
+          "public_id": "P-S99",
+          "public_name": "한○○",
+          "full_name": "한겨울",
+          "role": "member",
+          "campus": "수완",
+          "session_slots": [
+            "S_D1_AFTERNOON",
+            "S_D1_NIGHT",
+            "S_D2_MORNING"
+          ]
         }
       ]
     }
   ],
   "vehicles": [
-    { "vehicle_id": "V-SAMPLE", "label": "샘플 차량", "capacity": 5, "accessibility": false }
+    {
+      "vehicle_id": "V-SAMPLE",
+      "label": "샘플 차량",
+      "capacity": 5,
+      "accessibility": false
+    }
   ],
   "trips": [
     {
@@ -136,8 +287,18 @@
       "passenger_count": 2,
       "remaining_seats": 2,
       "passengers": [
-        { "public_id": "P-S01", "public_name": "김○○", "full_name": "김하늘", "boarding_status": "confirmed" },
-        { "public_id": "P-S03", "public_name": "박○", "full_name": "박솔", "boarding_status": "confirmed" }
+        {
+          "public_id": "P-S01",
+          "public_name": "김○○",
+          "boarding_status": "confirmed",
+          "full_name": "김가나"
+        },
+        {
+          "public_id": "P-S03",
+          "public_name": "박○",
+          "boarding_status": "confirmed",
+          "full_name": "박민"
+        }
       ],
       "updated_at": "2026-07-16T09:00:00+09:00"
     },
@@ -157,7 +318,12 @@
       "passenger_count": 1,
       "remaining_seats": 3,
       "passengers": [
-        { "public_id": "P-S02", "public_name": "이○○", "full_name": "이바다", "boarding_status": "planned" }
+        {
+          "public_id": "P-S02",
+          "public_name": "이○○",
+          "boarding_status": "planned",
+          "full_name": "이다라"
+        }
       ],
       "updated_at": "2026-07-16T09:00:00+09:00"
     },
@@ -177,8 +343,18 @@
       "passenger_count": 2,
       "remaining_seats": 2,
       "passengers": [
-        { "public_id": "P-S05", "public_name": "최○○", "full_name": "최가람", "boarding_status": "planned" },
-        { "public_id": "P-S06", "public_name": "남궁○○", "full_name": "남궁도훈", "boarding_status": "planned" }
+        {
+          "public_id": "P-S05",
+          "public_name": "최○○",
+          "boarding_status": "planned",
+          "full_name": "최지은"
+        },
+        {
+          "public_id": "P-S06",
+          "public_name": "남궁○○",
+          "boarding_status": "planned",
+          "full_name": "남궁서준"
+        }
       ],
       "updated_at": "2026-07-16T09:00:00+09:00"
     }
@@ -191,10 +367,19 @@
     "warnings": []
   },
   "teachers": [
-    { "participant_id": "T-01", "full_name": "정도움", "campus": "수완", "group_id": "G-SAMPLE-2" },
-    { "participant_id": "T-02", "full_name": "한믿음", "campus": "임동", "group_id": null }
+    {
+      "participant_id": "pt_ps04",
+      "full_name": "정수현",
+      "campus": "수완",
+      "group_id": "G-SAMPLE-2"
+    }
   ],
   "staff": [
-    { "participant_id": "ST-01", "full_name": "오섬김", "campus": "임동", "group_id": null }
+    {
+      "participant_id": "pt_staff01",
+      "full_name": "오진행",
+      "campus": "임동",
+      "group_id": null
+    }
   ]
 }
