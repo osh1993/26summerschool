@@ -75,8 +75,17 @@ const state = {
     private: {},
     query: "",
     disabled: true
+  },
+  // 배정 편집(Phase C): 조/방/차량 배정 데이터. 서버(get_assignments)에서만 채워지고 민감필드(전화·생년월일)는 포함되지 않는다.
+  assignments: {
+    data: null,
+    view: "groups",
+    disabled: true
   }
 };
+
+// 조 역할 옵션(Core.js GROUP_ASSIGNMENT_ROLES와 일치해야 한다).
+const GROUP_ROLE_OPTIONS = [["member", "조원"], ["leader", "조장"], ["sub_leader", "부조장"], ["teacher", "조선생님"]];
 
 // 참석자 편집 폼 enum 옵션(Core.js validateParticipantInput 계약과 일치해야 한다).
 const PARTICIPANT_PERSON_TYPE_OPTIONS = [["student", "학생"], ["teacher", "교사"], ["staff", "스탭"]];
@@ -148,6 +157,7 @@ async function init() {
   bindInternal();
   bindConfig();
   bindParticipants();
+  bindAssignments();
 
   try {
     const loaded = await loadSnapshot();
@@ -927,6 +937,9 @@ function logoutInternal() {
   state.participants.private = {};
   closeParticipantForm();
   renderParticipants([], {}, true);
+  // 배정 편집(Phase C) 상태·화면 초기화.
+  state.assignments.data = null;
+  renderAssignmentsDisabled("내부 명단 탭에서 먼저 로그인하세요.");
   showInternalView(false);
   setInternalMessage("로그아웃되었습니다.", false);
 }
@@ -1169,8 +1182,9 @@ function renderConfig() {
     modeNote.hidden = false;
     modeNote.textContent = "샘플(데모) 모드입니다. 실제 백엔드(config.js의 internalApiUrl)를 연결해야 설정을 저장할 수 있습니다.";
     applyConfigData(emptyConfigData(), true);
-    // 참석자 관리는 PII를 다루므로 샘플 모드에서 비활성(실서버에서만 조회/편집).
+    // 참석자 관리·배정 편집은 실데이터/PII를 다루므로 샘플 모드에서 비활성(실서버에서만 조회/편집).
     renderParticipants([], {}, true);
+    renderAssignmentsDisabled("샘플(데모) 모드입니다. 실제 백엔드(config.js의 internalApiUrl)를 연결해야 배정을 편집할 수 있습니다.");
     return;
   }
 
@@ -1201,11 +1215,13 @@ async function loadConfig() {
     }
     state.config.loaded = true;
     applyConfigData(data, false);
-    // 설정 로드 성공 후 참석자 목록(PII)도 함께 불러온다(같은 토큰·서버).
+    // 설정 로드 성공 후 참석자 목록(PII)·배정 데이터도 함께 불러온다(같은 토큰·서버).
     loadParticipants();
+    loadAssignments();
   } catch (error) {
     applyConfigData(emptyConfigData(), true);
     renderParticipants([], {}, true);
+    renderAssignmentsDisabled("설정을 불러오지 못해 배정 편집을 사용할 수 없습니다.");
   } finally {
     state.config.loading = false;
   }
@@ -1744,3 +1760,464 @@ function getVal(id) { const el = document.getElementById(id); return el ? el.val
 function setVal(id, value) { const el = document.getElementById(id); if (el) el.value = value == null ? "" : String(value); }
 function getChecked(id) { const el = document.getElementById(id); return !!(el && el.checked); }
 function setChecked(id, value) { const el = document.getElementById(id); if (el) el.checked = !!value; }
+
+/* ── 배정 편집(Phase C) ─────────────────────────────────
+   인증 토큰으로 get_assignments/save_group_assignment/save_room_assignment/save_trip_passenger를 호출한다.
+   드래그 없이 select + 배정/이동 버튼으로 접근성 우선. 저장 실패(validation_blocked) 시 이슈를 aria-live로
+   표시하고 서버 재조회로 롤백한다. 값 주입은 textContent/value로만(XSS 안전). 공개는 별도 게시 파이프라인을 거친다. */
+function bindAssignments() {
+  document.querySelectorAll(".assign-subtab").forEach((btn) => {
+    btn.addEventListener("click", () => activateAssignView(btn.dataset.assign));
+  });
+  const gForm = document.getElementById("assign-group-form");
+  if (gForm) gForm.addEventListener("submit", onSaveGroupAssignment);
+  const rForm = document.getElementById("assign-room-form");
+  if (rForm) rForm.addEventListener("submit", onSaveRoomAssignment);
+  const tForm = document.getElementById("assign-trip-form");
+  if (tForm) tForm.addEventListener("submit", onSaveTripPassenger);
+  fillSelect("ag-role", GROUP_ROLE_OPTIONS);
+}
+
+function activateAssignView(name) {
+  state.assignments.view = name;
+  document.querySelectorAll(".assign-subtab").forEach((btn) => {
+    const active = btn.dataset.assign === name;
+    btn.classList.toggle("is-active", active);
+    btn.setAttribute("aria-selected", String(active));
+    btn.tabIndex = active ? 0 : -1;
+  });
+  ["groups", "rooms", "trips"].forEach((key) => {
+    const panel = document.getElementById(`assign-panel-${key}`);
+    if (panel) panel.hidden = key !== name;
+  });
+}
+
+async function loadAssignments() {
+  const apiUrl = String(window.CAMP_CONFIG?.internalApiUrl || "").trim();
+  if (!apiUrl || !state.config.token) { renderAssignmentsDisabled("배정 데이터는 실서버(백엔드 연결)에서만 표시됩니다."); return; }
+  try {
+    const data = await postConfigAction("get_assignments", null);
+    if (data && data.error) {
+      if (handleConfigSessionError(data.error)) return;
+      renderAssignmentsDisabled("배정 데이터를 불러오지 못했습니다.");
+      return;
+    }
+    state.assignments.data = data;
+    state.assignments.disabled = false;
+    renderAssignments();
+  } catch (error) {
+    renderAssignmentsDisabled("배정 데이터를 불러오지 못했습니다.");
+  }
+}
+
+// 로그인/토큰/샘플 미비 상태: 편집 본문을 숨기고 안내(gate)만 보인다.
+function renderAssignmentsDisabled(text) {
+  state.assignments.disabled = true;
+  const gate = document.getElementById("assign-gate");
+  const gateText = document.getElementById("assign-gate-text");
+  const body = document.getElementById("assign-body");
+  if (gate && gateText) { gate.hidden = false; gate.dataset.tone = "info"; gateText.textContent = text || "배정 편집을 사용할 수 없습니다."; }
+  if (body) body.hidden = true;
+}
+
+function renderAssignments() {
+  const data = state.assignments.data;
+  const gate = document.getElementById("assign-gate");
+  const body = document.getElementById("assign-body");
+  if (!data) { renderAssignmentsDisabled("배정 데이터가 없습니다."); return; }
+  if (gate) gate.hidden = true;
+  if (body) body.hidden = false;
+  activateAssignView(state.assignments.view || "groups");
+  renderGroupAssignEditor();
+  renderRoomAssignEditor();
+  renderTripAssignEditor();
+}
+
+// ── 공통 헬퍼 ──
+function indexParticipants(list) {
+  const map = {};
+  (list || []).forEach((p) => { map[String(p.participant_id)] = p; });
+  return map;
+}
+
+function num(value) {
+  if (value == null || String(value).trim() === "") return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function participantLabel(p, fallbackId) {
+  const name = (p && p.legal_name) ? p.legal_name : ((p && p.public_id) ? p.public_id : fallbackId);
+  const code = (p && p.public_id) ? p.public_id : fallbackId;
+  return `${name} (${code})`;
+}
+
+function genderCounts(members, byId) {
+  const counts = { male: 0, female: 0, unknown: 0 };
+  members.forEach((a) => {
+    const p = byId[String(a.participant_id)];
+    const g = p ? String(p.gender || "").toLowerCase() : "";
+    if (g === "male") counts.male += 1;
+    else if (g === "female") counts.female += 1;
+    else counts.unknown += 1;
+  });
+  return counts;
+}
+
+function tripLabel(trip, vehById) {
+  const iso = String(trip.depart_at || "");
+  const date = iso.slice(0, 10);
+  const time = iso.slice(11, 16);
+  const veh = vehById[String(trip.vehicle_id)];
+  const dir = directionLabels[String(trip.direction).toUpperCase()] || trip.direction;
+  const when = date ? `${formatDate(date, true)} ${time}` : String(trip.trip_id);
+  return `${when} · ${dir} · ${veh ? (veh.public_label || trip.vehicle_id) : trip.vehicle_id}`;
+}
+
+function fillParticipantSelect(id, list) {
+  const select = document.getElementById(id);
+  if (!select) return;
+  const prev = select.value;
+  clearNode(select);
+  const ph = document.createElement("option");
+  ph.value = "";
+  ph.textContent = "(참가자 선택)";
+  select.append(ph);
+  (list || []).forEach((p) => {
+    const opt = document.createElement("option");
+    opt.value = p.participant_id;
+    opt.textContent = participantLabel(p, p.participant_id);
+    select.append(opt);
+  });
+  if (prev && (list || []).some((p) => String(p.participant_id) === prev)) select.value = prev;
+}
+
+function fillSlotSelect(id, pairs, placeholderLabel) {
+  const select = document.getElementById(id);
+  if (!select) return;
+  const prev = select.value;
+  clearNode(select);
+  const ph = document.createElement("option");
+  ph.value = "";
+  ph.textContent = placeholderLabel;
+  select.append(ph);
+  (pairs || []).forEach(([value, label]) => {
+    const opt = document.createElement("option");
+    opt.value = value;
+    opt.textContent = label;
+    select.append(opt);
+  });
+  if (prev && (pairs || []).some(([v]) => String(v) === prev)) select.value = prev;
+}
+
+function assignActionButton(label, fn) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "assign-action";
+  button.textContent = label;
+  button.addEventListener("click", fn);
+  return button;
+}
+
+// 미배정 참가자 풀 카드. 각 참가자에 '배정' 버튼(폼 프리필).
+function unassignedPoolCard(title, pool, onPick) {
+  const card = element("article", "assign-slot-card assign-pool-card");
+  const head = element("header", "assign-slot-head");
+  appendTextElement(head, "h4", `${title} · ${pool.length}명`);
+  card.append(head);
+  const list = element("ul", "assign-member-list");
+  if (!pool.length) {
+    appendTextElement(list, "li", "미배정 인원이 없습니다.", "assign-empty");
+  } else {
+    pool.forEach((p) => {
+      const li = element("li", "assign-member");
+      appendTextElement(li, "span", participantLabel(p, p.participant_id), "assign-member-name");
+      const actions = element("span", "assign-member-actions");
+      actions.append(assignActionButton("배정", () => onPick(p)));
+      li.append(actions);
+      list.append(li);
+    });
+  }
+  card.append(list);
+  return card;
+}
+
+// 저장(공통): 낙관적 UI 이후 서버 재조회로 확정/롤백한다. validation_blocked면 이슈를 aria-live로 알린다.
+async function submitAssignment(action, payload, msgId, formEl) {
+  if (state.assignments.disabled) return;
+  clearConfigMsg(msgId);
+  const buttons = formEl ? Array.from(formEl.querySelectorAll("button")) : [];
+  buttons.forEach((b) => { b.disabled = true; });
+  try {
+    const data = await postConfigAction(action, payload);
+    if (data && data.error) {
+      if (handleConfigSessionError(data.error)) return;
+      const text = data.error === "validation_blocked"
+        ? "검증에 막혀 저장하지 못했습니다. 정원·성별·중복·좌석(운전자 포함) 규칙을 확인하세요. 화면을 서버 상태로 되돌립니다."
+        : (CONFIG_ERROR_MESSAGES[data.error] || "저장하지 못했습니다.");
+      await loadAssignments(); // 서버 재조회로 롤백
+      showConfigMsg(msgId, text, "error", data.issues);
+      return;
+    }
+    const warnings = Array.isArray(data.warnings) ? data.warnings : [];
+    await loadAssignments(); // 서버 진실로 갱신
+    showConfigMsg(msgId, "저장했습니다." + (warnings.length ? ` (경고 ${warnings.length}건)` : ""), warnings.length ? "warn" : "info", warnings);
+  } catch (error) {
+    await loadAssignments();
+    showConfigMsg(msgId, CONFIG_ERROR_MESSAGES.temporarily_unavailable, "error");
+  } finally {
+    buttons.forEach((b) => { b.disabled = false; });
+  }
+}
+
+// ── 조 배정 ──
+function renderGroupAssignEditor() {
+  const data = state.assignments.data;
+  const groups = (data.groups || []).filter((g) => bool(g.active));
+  const participants = data.participants || [];
+  const byId = indexParticipants(participants);
+  const active = participants.filter((p) => bool(p.active));
+
+  fillParticipantSelect("ag-participant", active);
+  fillSlotSelect("ag-group", groups.map((g) => [g.group_id, g.display_name || g.group_id]), "(미배정으로 해제)");
+
+  const container = document.getElementById("assign-group-slots");
+  clearNode(container);
+
+  const byGroup = {};
+  const assignedIds = new Set();
+  (data.groupAssignments || []).forEach((a) => {
+    assignedIds.add(String(a.participant_id));
+    (byGroup[String(a.group_id)] = byGroup[String(a.group_id)] || []).push(a);
+  });
+
+  groups.forEach((group) => {
+    const members = byGroup[String(group.group_id)] || [];
+    const card = element("article", "assign-slot-card");
+    const head = element("header", "assign-slot-head");
+    appendTextElement(head, "h4", group.display_name || group.group_id);
+    const target = num(group.target_size);
+    const max = num(group.max_size);
+    const counts = genderCounts(members, byId);
+    const metaText = `현원 ${members.length}`
+      + (target != null ? ` / 목표 ${target}` : "")
+      + (max != null ? ` (최대 ${max})` : "")
+      + ` · 남 ${counts.male} 여 ${counts.female}${counts.unknown ? ` 미상 ${counts.unknown}` : ""}`;
+    appendTextElement(head, "p", metaText, "assign-slot-meta");
+    card.append(head);
+    const list = element("ul", "assign-member-list");
+    if (!members.length) appendTextElement(list, "li", "배정된 인원이 없습니다.", "assign-empty");
+    else members.forEach((a) => list.append(groupMemberRow(a, byId)));
+    card.append(list);
+    container.append(card);
+  });
+
+  const pool = active.filter((p) => !assignedIds.has(String(p.participant_id)));
+  container.append(unassignedPoolCard("미배정", pool, (p) => prefillGroupForm(p.participant_id, "", "member", false)));
+}
+
+function groupMemberRow(a, byId) {
+  const p = byId[String(a.participant_id)] || {};
+  const li = element("li", "assign-member");
+  appendTextElement(li, "span", participantLabel(p, a.participant_id), "assign-member-name");
+  appendTextElement(li, "span", roleLabels[a.role] || a.role || "조원", "assign-tag");
+  if (bool(a.locked)) appendTextElement(li, "span", "🔒 잠금", "assign-tag assign-lock");
+  const actions = element("span", "assign-member-actions");
+  actions.append(assignActionButton("편집", () => prefillGroupForm(a.participant_id, a.group_id, a.role || "member", bool(a.locked))));
+  actions.append(assignActionButton("해제", () => submitAssignment("save_group_assignment", { participant_id: a.participant_id, group_id: "", role: a.role || "member", locked: false }, "assign-group-msg", document.getElementById("assign-group-form"))));
+  li.append(actions);
+  return li;
+}
+
+function prefillGroupForm(pid, gid, role, locked) {
+  activateAssignView("groups");
+  setVal("ag-participant", pid);
+  setVal("ag-group", gid || "");
+  setVal("ag-role", role || "member");
+  setChecked("ag-locked", !!locked);
+  const el = document.getElementById("ag-participant");
+  if (el) el.focus();
+}
+
+function onSaveGroupAssignment(event) {
+  event.preventDefault();
+  const participantId = getVal("ag-participant");
+  if (!participantId) { showConfigMsg("assign-group-msg", "먼저 참가자를 선택하세요.", "error"); return; }
+  const payload = { participant_id: participantId, group_id: getVal("ag-group"), role: getVal("ag-role"), locked: getChecked("ag-locked") };
+  submitAssignment("save_group_assignment", payload, "assign-group-msg", document.getElementById("assign-group-form"));
+}
+
+// ── 방 배정 ──
+function renderRoomAssignEditor() {
+  const data = state.assignments.data;
+  const rooms = (data.rooms || []).filter((r) => bool(r.active));
+  const participants = data.participants || [];
+  const byId = indexParticipants(participants);
+  const active = participants.filter((p) => bool(p.active));
+
+  fillParticipantSelect("ar-participant", active);
+  fillSlotSelect("ar-room", rooms.map((r) => [r.room_id, r.display_name || r.room_id]), "(미배정으로 해제)");
+
+  const container = document.getElementById("assign-room-slots");
+  clearNode(container);
+
+  const byRoom = {};
+  const assignedIds = new Set();
+  (data.roomAssignments || []).forEach((a) => {
+    assignedIds.add(String(a.participant_id));
+    (byRoom[String(a.room_id)] = byRoom[String(a.room_id)] || []).push(a);
+  });
+
+  rooms.forEach((room) => {
+    const members = byRoom[String(room.room_id)] || [];
+    const card = element("article", "assign-slot-card");
+    const head = element("header", "assign-slot-head");
+    appendTextElement(head, "h4", room.display_name || room.room_id);
+    head.append(genderChip(room.gender_scope));
+    const cap = num(room.capacity);
+    const remaining = cap != null ? cap - members.length : null;
+    const metaText = `현원 ${members.length}`
+      + (cap != null ? ` / 정원 ${cap}` : "")
+      + (remaining != null ? ` · 남은 자리 ${remaining < 0 ? 0 : remaining}` : "");
+    appendTextElement(head, "p", metaText, "assign-slot-meta");
+    card.append(head);
+    const list = element("ul", "assign-member-list");
+    if (!members.length) appendTextElement(list, "li", "배정된 인원이 없습니다.", "assign-empty");
+    else members.forEach((a) => list.append(roomMemberRow(a, byId)));
+    card.append(list);
+    container.append(card);
+  });
+
+  const pool = active.filter((p) => !assignedIds.has(String(p.participant_id)));
+  container.append(unassignedPoolCard("미배정", pool, (p) => prefillRoomForm(p.participant_id, "", false)));
+}
+
+function roomMemberRow(a, byId) {
+  const p = byId[String(a.participant_id)] || {};
+  const li = element("li", "assign-member");
+  appendTextElement(li, "span", participantLabel(p, a.participant_id), "assign-member-name");
+  appendTextElement(li, "span", personTypeLabels[p.person_type] || "학생", "assign-tag");
+  const genderLabel = PARTICIPANT_GENDER_LABELS[p.gender];
+  if (genderLabel) appendTextElement(li, "span", genderLabel, "assign-tag");
+  if (bool(a.locked)) appendTextElement(li, "span", "🔒 잠금", "assign-tag assign-lock");
+  const actions = element("span", "assign-member-actions");
+  actions.append(assignActionButton("편집", () => prefillRoomForm(a.participant_id, a.room_id, bool(a.locked))));
+  actions.append(assignActionButton("해제", () => submitAssignment("save_room_assignment", { participant_id: a.participant_id, room_id: "", locked: false }, "assign-room-msg", document.getElementById("assign-room-form"))));
+  li.append(actions);
+  return li;
+}
+
+function prefillRoomForm(pid, rid, locked) {
+  activateAssignView("rooms");
+  setVal("ar-participant", pid);
+  setVal("ar-room", rid || "");
+  setChecked("ar-locked", !!locked);
+  const el = document.getElementById("ar-participant");
+  if (el) el.focus();
+}
+
+function onSaveRoomAssignment(event) {
+  event.preventDefault();
+  const participantId = getVal("ar-participant");
+  if (!participantId) { showConfigMsg("assign-room-msg", "먼저 참가자를 선택하세요.", "error"); return; }
+  const payload = { participant_id: participantId, room_id: getVal("ar-room"), locked: getChecked("ar-locked") };
+  submitAssignment("save_room_assignment", payload, "assign-room-msg", document.getElementById("assign-room-form"));
+}
+
+// ── 차량(운행) 배정 ──
+function renderTripAssignEditor() {
+  const data = state.assignments.data;
+  const trips = data.trips || [];
+  const participants = data.participants || [];
+  const byId = indexParticipants(participants);
+  const active = participants.filter((p) => bool(p.active));
+
+  fillParticipantSelect("at-participant", active);
+
+  const vehById = {};
+  (data.vehicles || []).forEach((v) => { vehById[String(v.vehicle_id)] = v; });
+  // 취소 운행은 선택지에서 제외한다(서버도 차단).
+  const selectable = trips.filter((t) => String(t.trip_status) !== "cancelled");
+  fillSlotSelect("at-trip", selectable.map((t) => [t.trip_id, tripLabel(t, vehById)]), "(선택한 방향 해제)");
+
+  const container = document.getElementById("assign-trip-slots");
+  clearNode(container);
+
+  const byTrip = {};
+  (data.tripPassengers || []).forEach((tp) => {
+    if (String(tp.boarding_status) === "cancelled") return;
+    (byTrip[String(tp.trip_id)] = byTrip[String(tp.trip_id)] || []).push(tp);
+  });
+
+  ["IN", "OUT"].forEach((dir) => {
+    const dirTrips = selectable
+      .filter((t) => String(t.direction).toUpperCase() === dir)
+      .sort((a, b) => String(a.depart_at).localeCompare(String(b.depart_at)));
+    const dirWrap = element("section", "assign-dir-group");
+    appendTextElement(dirWrap, "h4", directionLabels[dir] || dir, "assign-dir-title");
+    if (!dirTrips.length) appendTextElement(dirWrap, "p", "등록된 운행이 없습니다.", "assign-empty");
+    dirTrips.forEach((trip) => dirWrap.append(tripCardEditor(trip, byTrip[String(trip.trip_id)] || [], byId, vehById)));
+
+    const assignedInDir = new Set();
+    dirTrips.forEach((t) => (byTrip[String(t.trip_id)] || []).forEach((tp) => assignedInDir.add(String(tp.participant_id))));
+    const pool = active.filter((p) => !assignedInDir.has(String(p.participant_id)));
+    dirWrap.append(unassignedPoolCard(`미배정 (${dir})`, pool, (p) => prefillTripForm(p.participant_id, dir, "", 1, false)));
+    container.append(dirWrap);
+  });
+}
+
+function tripCardEditor(trip, tpList, byId, vehById) {
+  const card = element("article", "assign-slot-card");
+  const head = element("header", "assign-slot-head");
+  appendTextElement(head, "h4", tripLabel(trip, vehById));
+  const seatsUsed = tpList.reduce((sum, tp) => sum + (num(tp.seat_count) || 1), 0);
+  const capacity = num(trip.capacity) || 0;
+  const remaining = capacity - 1 - seatsUsed;
+  appendTextElement(head, "p", `전체 정원 ${capacity} · 운전자 포함 · 남은 승객 좌석 ${remaining < 0 ? 0 : remaining}`, "assign-slot-meta");
+  card.append(head);
+  const list = element("ul", "assign-member-list");
+  if (!tpList.length) appendTextElement(list, "li", "탑승자가 없습니다.", "assign-empty");
+  else tpList.forEach((tp) => list.append(tripPassengerRow(trip, tp, byId)));
+  card.append(list);
+  return card;
+}
+
+function tripPassengerRow(trip, tp, byId) {
+  const p = byId[String(tp.participant_id)] || {};
+  const dir = String(trip.direction).toUpperCase();
+  const li = element("li", "assign-member");
+  appendTextElement(li, "span", participantLabel(p, tp.participant_id), "assign-member-name");
+  appendTextElement(li, "span", `좌석 ${num(tp.seat_count) || 1}`, "assign-tag");
+  appendTextElement(li, "span", boardingStatusLabels[tp.boarding_status] || "예정", "assign-tag");
+  if (bool(tp.locked)) appendTextElement(li, "span", "🔒 잠금", "assign-tag assign-lock");
+  const actions = element("span", "assign-member-actions");
+  actions.append(assignActionButton("편집", () => prefillTripForm(tp.participant_id, dir, trip.trip_id, num(tp.seat_count) || 1, bool(tp.locked))));
+  actions.append(assignActionButton("해제", () => submitAssignment("save_trip_passenger", { participant_id: tp.participant_id, trip_id: "", direction: dir, locked: false }, "assign-trip-msg", document.getElementById("assign-trip-form"))));
+  li.append(actions);
+  return li;
+}
+
+function prefillTripForm(pid, dir, tripId, seat, locked) {
+  activateAssignView("trips");
+  setVal("at-participant", pid);
+  setVal("at-direction", dir || "IN");
+  setVal("at-trip", tripId || "");
+  setVal("at-seat_count", seat != null ? seat : 1);
+  setChecked("at-locked", !!locked);
+  const el = document.getElementById("at-participant");
+  if (el) el.focus();
+}
+
+function onSaveTripPassenger(event) {
+  event.preventDefault();
+  const participantId = getVal("at-participant");
+  if (!participantId) { showConfigMsg("assign-trip-msg", "먼저 참가자를 선택하세요.", "error"); return; }
+  const payload = {
+    participant_id: participantId,
+    trip_id: getVal("at-trip"),
+    direction: getVal("at-direction"),
+    seat_count: getVal("at-seat_count"),
+    locked: getChecked("at-locked")
+  };
+  submitAssignment("save_trip_passenger", payload, "assign-trip-msg", document.getElementById("assign-trip-form"));
+}

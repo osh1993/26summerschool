@@ -541,6 +541,78 @@
             <p id="config-participant-form-msg" class="config-msg" role="status" aria-live="polite" hidden></p>
           </form>
         </section>
+
+        <!-- 7) 배정 편집 (조/방/차량) — 인증 관리자 전용. 공개 읽기뷰(조편성/방배정/차량 운행 탭)와 분리된 편집뷰. -->
+        <section class="config-block" aria-labelledby="config-assign-head">
+          <h3 id="config-assign-head" class="internal-subhead">배정 편집 (조 · 방 · 차량)</h3>
+          <p class="config-hint">
+            드래그 없이 <strong>선택 + 배정/이동</strong> 버튼으로 배정합니다. 저장 시 정원·성별·중복·좌석(운전자 포함) 검증으로
+            위반은 <strong>차단</strong>됩니다. 잠금(locked) 배정은 자동 제안이 덮어쓰지 못합니다.
+            공개 반영은 별도로 <strong>공개 스냅샷 게시</strong>가 필요합니다(이 화면은 자동 공개하지 않습니다).
+          </p>
+
+          <div id="assign-gate" class="config-gate" role="status" aria-live="polite" hidden>
+            <p id="assign-gate-text"></p>
+          </div>
+
+          <div id="assign-body" hidden>
+            <div class="assign-subtabs" role="tablist" aria-label="배정 편집 대상">
+              <button type="button" class="assign-subtab is-active" role="tab" aria-selected="true" data-assign="groups" id="assign-tab-groups" aria-controls="assign-panel-groups">
+                <span aria-hidden="true">👥</span> 조 배정
+              </button>
+              <button type="button" class="assign-subtab" role="tab" aria-selected="false" data-assign="rooms" id="assign-tab-rooms" aria-controls="assign-panel-rooms" tabindex="-1">
+                <span aria-hidden="true">🛏️</span> 방 배정
+              </button>
+              <button type="button" class="assign-subtab" role="tab" aria-selected="false" data-assign="trips" id="assign-tab-trips" aria-controls="assign-panel-trips" tabindex="-1">
+                <span aria-hidden="true">🚐</span> 차량 배정
+              </button>
+            </div>
+
+            <!-- 조 배정 -->
+            <div id="assign-panel-groups" class="assign-panel" role="tabpanel" aria-labelledby="assign-tab-groups">
+              <form id="assign-group-form" class="assign-form" autocomplete="off">
+                <label class="field field-wide"><span>참가자</span><select id="ag-participant" aria-label="배정할 참가자"></select></label>
+                <label class="field"><span>대상 조</span><select id="ag-group" aria-label="대상 조 (비우면 해제)"></select></label>
+                <label class="field"><span>역할</span><select id="ag-role" aria-label="조 역할"></select></label>
+                <label class="field field-check"><input type="checkbox" id="ag-locked"><span>잠금</span></label>
+                <button type="submit" class="config-save"><span aria-hidden="true">↔</span> 배정 / 이동</button>
+              </form>
+              <p id="assign-group-msg" class="config-msg" role="status" aria-live="assertive" hidden></p>
+              <div id="assign-group-slots" class="assign-slots" aria-live="polite"></div>
+            </div>
+
+            <!-- 방 배정 -->
+            <div id="assign-panel-rooms" class="assign-panel" role="tabpanel" aria-labelledby="assign-tab-rooms" hidden>
+              <form id="assign-room-form" class="assign-form" autocomplete="off">
+                <label class="field field-wide"><span>참가자</span><select id="ar-participant" aria-label="배정할 참가자"></select></label>
+                <label class="field"><span>대상 방</span><select id="ar-room" aria-label="대상 방 (비우면 해제)"></select></label>
+                <label class="field field-check"><input type="checkbox" id="ar-locked"><span>잠금</span></label>
+                <button type="submit" class="config-save"><span aria-hidden="true">↔</span> 배정 / 이동</button>
+              </form>
+              <p id="assign-room-msg" class="config-msg" role="status" aria-live="assertive" hidden></p>
+              <div id="assign-room-slots" class="assign-slots" aria-live="polite"></div>
+            </div>
+
+            <!-- 차량 배정 -->
+            <div id="assign-panel-trips" class="assign-panel" role="tabpanel" aria-labelledby="assign-tab-trips" hidden>
+              <form id="assign-trip-form" class="assign-form" autocomplete="off">
+                <label class="field field-wide"><span>참가자</span><select id="at-participant" aria-label="배정할 참가자"></select></label>
+                <label class="field"><span>방향</span>
+                  <select id="at-direction" aria-label="이동 방향">
+                    <option value="IN">IN · 수련회장으로</option>
+                    <option value="OUT">OUT · 광주로</option>
+                  </select>
+                </label>
+                <label class="field field-wide"><span>대상 운행</span><select id="at-trip" aria-label="대상 운행 (비우면 해당 방향 해제)"></select></label>
+                <label class="field"><span>좌석 수</span><input type="number" id="at-seat_count" inputmode="numeric" min="1" value="1" aria-label="좌석 수"></label>
+                <label class="field field-check"><input type="checkbox" id="at-locked"><span>잠금</span></label>
+                <button type="submit" class="config-save"><span aria-hidden="true">↔</span> 배정 / 이동</button>
+              </form>
+              <p id="assign-trip-msg" class="config-msg" role="status" aria-live="assertive" hidden></p>
+              <div id="assign-trip-slots" class="assign-slots" aria-live="polite"></div>
+            </div>
+          </div>
+        </section>
       </div>
     </section>
 

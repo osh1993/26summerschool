@@ -1286,6 +1286,187 @@ tr.is-inactive {
   flex: 0 0 auto;
 }
 
+/* ── 배정 편집(Phase C) ── */
+.assign-subtabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0 14px;
+}
+
+.assign-subtab {
+  min-height: 40px;
+  padding: 0 14px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--navy-soft);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.assign-subtab.is-active {
+  background: var(--blue-pale);
+  border-color: var(--blue);
+  color: var(--blue-dark);
+}
+
+.assign-subtab:focus-visible {
+  outline: 3px solid var(--blue);
+  outline-offset: 2px;
+}
+
+.assign-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #f7fafc;
+}
+
+.assign-form .field {
+  flex: 1 1 150px;
+  margin: 0;
+}
+
+.assign-form .field-wide {
+  flex: 2 1 220px;
+}
+
+.assign-form .field-check {
+  flex: 0 0 auto;
+}
+
+.assign-form .config-save {
+  flex: 0 0 auto;
+}
+
+.assign-slots {
+  margin-top: 14px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 12px;
+}
+
+.assign-dir-group {
+  grid-column: 1 / -1;
+}
+
+.assign-dir-title {
+  margin: 6px 0 8px;
+  color: var(--navy);
+  font-size: 1rem;
+}
+
+.assign-dir-group .assign-slot-card {
+  margin-bottom: 10px;
+}
+
+.assign-slot-card {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  padding: 12px;
+}
+
+.assign-pool-card {
+  grid-column: 1 / -1;
+  background: #fbfdff;
+  border-style: dashed;
+}
+
+.assign-slot-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.assign-slot-head h4 {
+  margin: 0;
+  color: var(--navy);
+  font-size: 0.98rem;
+}
+
+.assign-slot-meta {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.assign-member-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.assign-member {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: var(--background);
+}
+
+.assign-member-name {
+  font-weight: 700;
+  color: var(--ink);
+  flex: 1 1 120px;
+}
+
+.assign-tag {
+  font-size: 0.78rem;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--blue-pale);
+  color: var(--blue-dark);
+}
+
+.assign-tag.assign-lock {
+  background: var(--amber-pale);
+  color: var(--amber);
+}
+
+.assign-member-actions {
+  display: inline-flex;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.assign-action {
+  min-height: 34px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--blue-dark);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.assign-action:focus-visible {
+  outline: 3px solid var(--blue);
+  outline-offset: 2px;
+}
+
+.assign-empty {
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 0.85rem;
+}
+
 [hidden] {
   display: none !important;
 }
@@ -1322,6 +1503,15 @@ tr.is-inactive {
 
   .config-settings,
   .config-participant-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .assign-form {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .assign-slots {
     grid-template-columns: 1fr;
   }
 

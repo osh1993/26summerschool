@@ -1735,6 +1735,337 @@ var CampCore = (function () {
     };
   }
 
+  // ── 배정 편집(Phase C) 단건 검증·감사 ─────────────────────────────────────
+  // 웹 관리자가 참가자를 조/방/차량(운행)에 배정·이동·해제할 때 저장 시점 무결성을 판정한다.
+  // 시트 I/O·assignment_id/trip_passenger_id 발급·커밋·Change_Log 스탬프는 06_PublicApi.gs가 담당하고,
+  // 여기서는 blocking/warning 판정과 실행 계획(plan)만 만든다.
+  // 이번 변경의 희망값(role·locked·seat_count·boarding_status)은 participant 객체에 얹혀 전달된다(publisher가 payload 병합).
+  var GROUP_ASSIGNMENT_ROLES = ['member', 'leader', 'sub_leader', 'teacher'];
+  var TRIP_DIRECTIONS = ['IN', 'OUT'];
+  var GENDER_IMBALANCE_MIN = 4;      // 성별 과편중 경고를 켜는 최소 인원(성별 판정 가능자 기준)
+  var GENDER_IMBALANCE_RATIO = 0.8;  // 한 성별 비율이 이 이상이면 과편중 경고
+
+  // 배정 행이 유효(비취소)한지. group_assignment는 assignment_status, trip_passenger는 boarding_status로 판정.
+  function assignmentActive_(row) {
+    return String(row && row.assignment_status != null ? row.assignment_status : 'active') !== 'cancelled';
+  }
+
+  // 성별을 판정 가능한 경우에만 집계한다(빈값·미상은 제외해 과편중 오탐 방지).
+  function countGender_(value, counts) {
+    var g = normalizeGender_(value);
+    if (g === 'male') { counts.male += 1; counts.known += 1; }
+    else if (g === 'female') { counts.female += 1; counts.known += 1; }
+  }
+
+  // 조 배정 단건 변경 검증. targetGroupId 빈값/null이면 해제(remove).
+  function validateGroupAssignmentChange(participant, targetGroupId, groups, currentAssignments) {
+    participant = participant || {};
+    var issues = [];
+    var pid = String(participant.participant_id == null ? '' : participant.participant_id);
+    var groupIndex = indexBy(groups, 'group_id');
+    var target = String(targetGroupId == null ? '' : targetGroupId).trim();
+    var isRemove = target === '';
+
+    // 참가자의 현재(비취소) 조 배정
+    var existing = (currentAssignments || []).filter(function (row) {
+      return String(row.participant_id) === pid && assignmentActive_(row);
+    });
+
+    if (isRemove) {
+      var removeRow = existing[0] || null;
+      return {
+        ok: true,
+        issues: issues,
+        plan: {
+          op: removeRow ? 'remove' : 'noop',
+          assignmentId: removeRow ? (removeRow.assignment_id == null ? null : removeRow.assignment_id) : null,
+          participantId: pid,
+          groupId: null,
+          role: null,
+          locked: false
+        }
+      };
+    }
+
+    // 대상 조 존재/활성(차단)
+    var group = groupIndex[target];
+    if (!group) {
+      issues.push(issue('GROUP_TARGET_UNKNOWN', 'group_assignment', pid, '대상 조가 존재하지 않습니다.'));
+    } else if (!activeRow(group)) {
+      issues.push(issue('GROUP_TARGET_INACTIVE', 'group_assignment', pid, '비활성 조에는 배정할 수 없습니다.'));
+    }
+
+    // role 어휘(차단). 빈값은 member 기본.
+    var role = String(participant.role == null ? '' : participant.role).trim();
+    if (role === '') role = 'member';
+    else if (GROUP_ASSIGNMENT_ROLES.indexOf(role) < 0) {
+      issues.push(issue('GROUP_ROLE_INVALID', 'group_assignment', pid, '허용되지 않은 role 값입니다.'));
+    }
+    var locked = bool(participant.locked);
+
+    // 재사용할 기존 행: 대상 조에 이미 있으면 그 행, 아니면 첫 기존 행(이동)
+    var reuseRow = existing.filter(function (row) { return String(row.group_id) === target; })[0] || existing[0] || null;
+    // 참가자당 조 1개: 재사용 행 외에 다른 조 배정이 남으면 중복(차단). 단일 행 이동은 허용.
+    var leftover = existing.filter(function (row) { return row !== reuseRow && String(row.group_id) !== target; });
+    if (existing.length > 1 || leftover.length > 0) {
+      issues.push(issue('MULTIPLE_ACTIVE_GROUPS', 'participant', pid, '참가자가 두 개 이상의 조에 배정됩니다. 기존 배정을 먼저 정리하세요.'));
+    }
+
+    // 잠금 이동 경고(비차단): 잠금된 기존 배정을 다른 조로 옮기려 함(수동 해제 필요)
+    if (reuseRow && bool(reuseRow.locked) && String(reuseRow.group_id) !== target) {
+      issues.push(issue('GROUP_LOCKED_CONFLICT', 'group_assignment', pid, '잠금된 조 배정을 이동하려면 먼저 잠금을 해제해야 합니다.', false, 'warning'));
+    }
+
+    // 정원·성별 경고(비차단): 대상 조에 이 참가자를 더한 결과 기준
+    if (group) {
+      var othersInTarget = (currentAssignments || []).filter(function (row) {
+        return assignmentActive_(row) && String(row.group_id) === target && String(row.participant_id) !== pid;
+      });
+      var resultCount = othersInTarget.length + 1;
+      var maxSize = number(group.max_size, Infinity);
+      var targetSize = number(group.target_size, Infinity);
+      if (resultCount > maxSize) issues.push(issue('GROUP_MAX_SIZE_EXCEEDED', 'group', target, '조 최대 인원을 초과합니다.', false, 'warning'));
+      else if (resultCount > targetSize) issues.push(issue('GROUP_TARGET_SIZE_EXCEEDED', 'group', target, '조 권장 인원을 초과합니다.', false, 'warning'));
+
+      // 성별 과편중: 대상 조 배정자 gender(publisher가 조인) + 이 참가자 gender로 판정. 성별 미상은 제외.
+      var genderCounts = { male: 0, female: 0, known: 0 };
+      countGender_(participant.gender, genderCounts);
+      othersInTarget.forEach(function (row) { countGender_(row.gender, genderCounts); });
+      if (genderCounts.known >= GENDER_IMBALANCE_MIN &&
+          Math.max(genderCounts.male, genderCounts.female) / genderCounts.known >= GENDER_IMBALANCE_RATIO) {
+        issues.push(issue('GROUP_GENDER_IMBALANCE', 'group', target, '조 성별이 한쪽으로 크게 치우칩니다.', false, 'warning'));
+      }
+    }
+
+    // noop: 이미 대상 조에 같은 role/locked로 있으면 변경 없음
+    var op = 'upsert';
+    if (reuseRow && String(reuseRow.group_id) === target &&
+        String(reuseRow.role == null ? 'member' : reuseRow.role) === role &&
+        bool(reuseRow.locked) === locked) {
+      op = 'noop';
+    }
+
+    return {
+      ok: blockingIssues(issues).length === 0,
+      issues: issues,
+      plan: {
+        op: op,
+        assignmentId: reuseRow ? (reuseRow.assignment_id == null ? null : reuseRow.assignment_id) : null,
+        participantId: pid,
+        groupId: target,
+        role: role,
+        locked: locked
+      }
+    };
+  }
+
+  // 운행(차량) 탑승 단건 변경 검증. targetTripId 빈값/null이면 해당 direction 해제.
+  // 정원은 vehicle capacity에서 운전자 1석을 차감한 뒤 승객 좌석과 비교한다(운전자 좌석 포함).
+  function validateTripPassengerChange(participant, targetTripId, direction, trips, vehiclesById, currentPassengers, demand) {
+    participant = participant || {};
+    var issues = [];
+    var pid = String(participant.participant_id == null ? '' : participant.participant_id);
+    var tripsById = indexBy(trips, 'trip_id');
+    var vehicles = vehiclesById || {};
+    var target = String(targetTripId == null ? '' : targetTripId).trim();
+    var isRemove = target === '';
+    var reqDir = String(direction == null ? '' : direction).trim().toUpperCase();
+    var locked = bool(participant.locked);
+    // seat_count 우선순위: participant → demand → 1. number(null,x)는 0을 반환하므로 null 가드를 둔다.
+    var demandSeat = (demand && demand.seat_count != null) ? number(demand.seat_count, 1) : 1;
+    var seatCount = participant.seat_count == null ? demandSeat : number(participant.seat_count, demandSeat);
+    var boardingStatus = String(participant.boarding_status == null ? '' : participant.boarding_status).trim() || 'planned';
+
+    // 참가자의 현재(비취소/노쇼) 탑승. 각 행의 방향은 운행에서 조인해 얻는다.
+    var activePassengers = (currentPassengers || []).filter(function (row) {
+      return String(row.participant_id) === pid && ['cancelled', 'no_show'].indexOf(String(row.boarding_status)) < 0;
+    });
+    function dirOf_(row) {
+      var t = tripsById[String(row.trip_id)];
+      return t ? String(t.direction).toUpperCase() : String(row.direction == null ? '' : row.direction).toUpperCase();
+    }
+
+    if (isRemove) {
+      var removeRow = activePassengers.filter(function (row) { return dirOf_(row) === reqDir; })[0] || null;
+      return {
+        ok: true,
+        issues: issues,
+        plan: {
+          op: removeRow ? 'remove' : 'noop',
+          assignmentId: removeRow ? (removeRow.trip_passenger_id == null ? null : removeRow.trip_passenger_id) : null,
+          participantId: pid,
+          tripId: null,
+          direction: reqDir,
+          seatCount: seatCount,
+          boardingStatus: 'cancelled',
+          locked: locked
+        }
+      };
+    }
+
+    // 대상 운행 존재/취소·비활성(차단)
+    var trip = tripsById[target];
+    if (!trip) {
+      issues.push(issue('TRIP_TARGET_UNKNOWN', 'trip_passenger', pid, '대상 운행이 존재하지 않습니다.'));
+    } else if (String(trip.trip_status) === 'cancelled' || trip.active === false) {
+      issues.push(issue('TRIP_TARGET_INACTIVE', 'trip_passenger', pid, '취소/비활성 운행에는 배정할 수 없습니다.'));
+    }
+
+    // 방향: 대상 운행의 방향을 권위값으로 사용
+    var effDir = trip ? String(trip.direction).toUpperCase() : reqDir;
+    if (TRIP_DIRECTIONS.indexOf(effDir) < 0) {
+      issues.push(issue('TRIP_DIRECTION_INVALID', 'trip_passenger', pid, 'direction은 IN 또는 OUT이어야 합니다.'));
+    }
+
+    // 운전자를 같은 운행의 승객으로 배정 금지(차단) — 운전자 좌석과 승객 좌석 이중 점유 방지
+    if (trip && pid !== '' && String(trip.driver_participant_id) === pid) {
+      issues.push(issue('TRIP_DRIVER_AS_PASSENGER', 'trip_passenger', pid, '운전자는 같은 운행의 승객으로 배정할 수 없습니다.'));
+    }
+
+    // 같은 direction 1건: 재사용 행 외에 같은 방향 탑승이 남으면 중복(차단). 단일 행의 방향 내 이동은 허용.
+    var sameDir = activePassengers.filter(function (row) { return dirOf_(row) === effDir; });
+    var reuseRow = sameDir.filter(function (row) { return String(row.trip_id) === target; })[0] || sameDir[0] || null;
+    var leftover = sameDir.filter(function (row) { return row !== reuseRow && String(row.trip_id) !== target; });
+    if (sameDir.length > 1 || leftover.length > 0) {
+      issues.push(issue('TRIP_DUPLICATE_DIRECTION', 'participant', pid, '같은 방향(IN/OUT)에 두 건 이상 배정됩니다.'));
+    }
+
+    // 정원(운전자 좌석 포함): 승객 좌석 합 > capacity - 1이면 초과(차단)
+    if (trip) {
+      var vehicle = vehicles[String(trip.vehicle_id)];
+      var capacity = number(vehicle && vehicle.capacity_total, 0);
+      var othersSeats = (currentPassengers || []).filter(function (row) {
+        return String(row.trip_id) === target &&
+          ['cancelled', 'no_show'].indexOf(String(row.boarding_status)) < 0 &&
+          String(row.participant_id) !== pid;
+      }).reduce(function (sum, row) { return sum + number(row.seat_count, 1); }, 0);
+      if (othersSeats + seatCount > capacity - 1) {
+        issues.push(issue('TRIP_OVER_CAPACITY', 'trip', target, '운전자 좌석을 포함한 차량 정원을 초과합니다.'));
+      }
+    }
+
+    // 시간창 위반(경고): demand earliest/latest depart 대비 운행 출발
+    if (trip && demand) {
+      var depart = parseMillis(trip.depart_at);
+      var earliest = parseMillis(demand.earliest_depart_at);
+      var latest = parseMillis(demand.latest_depart_at);
+      if ((Number.isFinite(earliest) && Number.isFinite(depart) && depart < earliest) ||
+          (Number.isFinite(latest) && Number.isFinite(depart) && depart > latest)) {
+        issues.push(issue('TRIP_TIME_WINDOW', 'trip_passenger', pid, '운행 출발이 요청 시간창을 벗어납니다.', false, 'warning'));
+      }
+    }
+
+    // noop: 이미 대상 운행에 같은 seat/status/locked로 있으면 변경 없음
+    var op = 'upsert';
+    if (reuseRow && String(reuseRow.trip_id) === target &&
+        number(reuseRow.seat_count, 1) === seatCount &&
+        String(reuseRow.boarding_status == null ? 'planned' : reuseRow.boarding_status) === boardingStatus &&
+        bool(reuseRow.locked) === locked) {
+      op = 'noop';
+    }
+
+    return {
+      ok: blockingIssues(issues).length === 0,
+      issues: issues,
+      plan: {
+        op: op,
+        assignmentId: reuseRow ? (reuseRow.trip_passenger_id == null ? null : reuseRow.trip_passenger_id) : null,
+        participantId: pid,
+        tripId: target,
+        direction: effDir,
+        seatCount: seatCount,
+        boardingStatus: boardingStatus,
+        locked: locked
+      }
+    };
+  }
+
+  // 방 배정 단건 변경 검증. 기존 validateRoomAssignments를 재사용하는 얇은 래퍼.
+  // 대상 방에 이 참가자를 넣은(또는 뺀) 가상 배정셋을 만들어 판정하고, 이 참가자·대상 방 관련 이슈만 반환한다.
+  function validateRoomAssignmentChange(participant, targetRoomId, rooms, currentAssignments, participants) {
+    participant = participant || {};
+    var pid = String(participant.participant_id == null ? '' : participant.participant_id);
+    var target = String(targetRoomId == null ? '' : targetRoomId).trim();
+    var isRemove = target === '';
+
+    // 이 참가자의 기존 방 배정(재사용 id 판정)
+    var existing = (currentAssignments || []).filter(function (row) { return String(row.participant_id) === pid; });
+    var reuseRow = (target ? existing.filter(function (row) { return String(row.room_id) === target; })[0] : null) || existing[0] || null;
+
+    // 가상 배정셋: 이 참가자의 기존 행을 모두 제거하고, 해제가 아니면 대상 방에 1건 추가
+    var virtual = (currentAssignments || []).filter(function (row) { return String(row.participant_id) !== pid; });
+    if (!isRemove) virtual = virtual.concat([{ room_id: target, participant_id: pid }]);
+
+    // participants에 이 참가자가 없으면(웹 편집 대상) 더해 성별·미배정 판정이 되게 한다.
+    var partList = participants || [];
+    if (pid !== '' && !indexBy(partList, 'participant_id')[pid]) partList = partList.concat([participant]);
+
+    var result = validateRoomAssignments(rooms, virtual, partList);
+    // 이 참가자·대상 방과 관련된 이슈만 필터(다른 참가자의 미배정 경고 등 제외)
+    var issues = result.issues.filter(function (row) {
+      var eid = String(row.entity_id);
+      return eid === pid || eid === (target + '|' + pid) || (target !== '' && eid === target);
+    });
+
+    var op = 'upsert';
+    if (isRemove) op = reuseRow ? 'remove' : 'noop';
+    else if (reuseRow && String(reuseRow.room_id) === target && bool(reuseRow.locked) === bool(participant.locked)) op = 'noop';
+
+    return {
+      ok: blockingIssues(issues).length === 0,
+      issues: issues,
+      plan: {
+        op: op,
+        assignmentId: reuseRow ? (reuseRow.room_assignment_id == null ? null : reuseRow.room_assignment_id) : null,
+        participantId: pid,
+        roomId: isRemove ? null : target,
+        locked: bool(participant.locked)
+      }
+    };
+  }
+
+  // 배정 변경 감사행(Change_Log). 변경된 필드만, 내부 ID/비민감 값만(실명·전화 등 PII 절대 금지).
+  // change_id/changed_at는 순수함수라 넣지 않는다(06_PublicApi.gs가 커밋 시점에 스탬프). reason='admin_web'.
+  var ASSIGNMENT_CHANGE_FIELDS = {
+    group_assignment: ['group_id', 'role', 'locked'],
+    room_assignment: ['room_id', 'locked'],
+    trip_passenger: ['trip_id', 'direction', 'seat_count', 'boarding_status', 'locked']
+  };
+  var ASSIGNMENT_BOOL_FIELDS = ['locked'];
+
+  function assignmentAuditValue_(isBoolField, value) {
+    if (isBoolField) return bool(value) ? 'TRUE' : 'FALSE';
+    return value == null ? '' : value;
+  }
+
+  function buildAssignmentChangeRows(entityType, participantId, oldSlot, newSlot, changedBy, extra) {
+    var fields = ASSIGNMENT_CHANGE_FIELDS[String(entityType)];
+    if (!fields) return []; // 알 수 없는 entityType은 감사행 없음
+    oldSlot = oldSlot || {};
+    newSlot = newSlot || {};
+    var reason = (extra && extra.reason) ? String(extra.reason) : 'admin_web';
+    var rows = [];
+    fields.forEach(function (field) {
+      var isBoolField = ASSIGNMENT_BOOL_FIELDS.indexOf(field) >= 0;
+      var oldValue = oldSlot[field];
+      var newValue = newSlot[field];
+      var same = isBoolField
+        ? (bool(oldValue) === bool(newValue))
+        : (String(oldValue == null ? '' : oldValue) === String(newValue == null ? '' : newValue));
+      if (same) return; // 변경된 필드만 기록
+      rows.push({
+        entity_type: String(entityType),
+        entity_id: participantId == null ? '' : String(participantId),
+        field_name: field,
+        old_value: assignmentAuditValue_(isBoolField, oldValue),
+        new_value: assignmentAuditValue_(isBoolField, newValue),
+        changed_by: changedBy == null ? '' : String(changedBy),
+        reason: reason
+      });
+    });
+    return rows;
+  }
+
   return {
     issue: issue,
     bool: bool,
@@ -1757,6 +2088,10 @@ var CampCore = (function () {
     planRosterUpsert: planRosterUpsert,
     validateParticipantInput: validateParticipantInput,
     buildParticipantChangeRows: buildParticipantChangeRows,
+    validateGroupAssignmentChange: validateGroupAssignmentChange,
+    validateTripPassengerChange: validateTripPassengerChange,
+    validateRoomAssignmentChange: validateRoomAssignmentChange,
+    buildAssignmentChangeRows: buildAssignmentChangeRows,
     computeDistributionStats: computeDistributionStats,
     incrementalGroupPenalty: incrementalGroupPenalty,
     computeGroupProposal: computeGroupProposal,

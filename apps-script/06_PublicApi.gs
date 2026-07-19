@@ -413,6 +413,12 @@ function doPost(e) {
       case 'get_participants': return handleGetParticipants_();
       case 'save_participant': return withDocumentLock_(function () { return handleSaveParticipant_(body, verdict.user); });
       case 'deactivate_participant': return withDocumentLock_(function () { return handleDeactivateParticipant_(body, verdict.user); });
+      // ── 배정 편집(Phase C): 참가자를 조/방/차량(운행)에 배정·이동·해제한다. 저장 시 Core 검증으로 위반을 차단한다. ──
+      // get_assignments는 Participant_Private를 읽지 않는다(phone/birth 등 민감필드 미포함, legal_name까지만).
+      case 'get_assignments': return handleGetAssignments_();
+      case 'save_group_assignment': return withDocumentLock_(function () { return handleSaveGroupAssignment_(body, verdict.user); });
+      case 'save_room_assignment': return withDocumentLock_(function () { return handleSaveRoomAssignment_(body, verdict.user); });
+      case 'save_trip_passenger': return withDocumentLock_(function () { return handleSaveTripPassenger_(body, verdict.user); });
       case 'ensure_group_count': return runMenuMutation_(ensureGroupCountFromSettings);
       case 'ensure_room_count': return runMenuMutation_(ensureRoomCountFromSettings);
       default: return jsonResponse_({ error: 'not_found' });
@@ -455,7 +461,7 @@ function handleLogin_(body, secret) {
   // 내부 스냅샷 구조를 점검하되, 개인 민감 원문(전화/생년월일 등)만 유출 카나리로 검사한다(실명·내부ID는 내부뷰 정상 노출).
   var structural = CampCore.validateInternalSnapshot(snapshot, collectPrivateCanaries_(data));
   if (CampCore.blockingIssues(structural).length) return jsonResponse_({ error: 'temporarily_unavailable' });
-  // 비밀키가 있으면 2시간 만료 쓰기 토큰을 함께 반환한다(구조 검증 이후에 붙여 검증 대상에서 제외).
+  // 비밀키가 있으면 만료 쓰기 토큰(TTL=INTERNAL_TOKEN_TTL_MS, 현재 30분)을 함께 반환한다(구조 검증 이후에 붙여 검증 대상에서 제외).
   if (!isBlankSecret_(secret)) {
     snapshot.token = CampCore.issueAuthToken(String(body.user == null ? '' : body.user).trim(), Date.now(), INTERNAL_TOKEN_TTL_MS, secret, hmacHex_, internalTokenVersion_());
   }
@@ -1024,6 +1030,394 @@ function handleDeactivateParticipant_(body, changedBy) {
     }]));
   }
   return jsonResponse_({ ok: true, participant_id: participantId });
+}
+
+// ── 배정 편집(Phase C) 웹 핸들러 ─────────────────────────────────
+// 참가자를 조/방/차량(운행)에 배정·이동·해제한다. 순수 검증·plan·감사행은 Core.js가,
+// 시트 upsert/remove·id 발급·Change_Log 스탬프는 여기서 담당한다. get_assignments는 PII(전화·생년월일 등)를 절대 반환하지 않는다.
+
+// 배정 편집 화면용 참가자 공개모델(민감필드 없음). Participant_Private는 읽지 않으며 legal_name까지만 노출한다.
+function assignmentParticipant_(row) {
+  return {
+    participant_id: String(row.participant_id == null ? '' : row.participant_id),
+    public_id: String(row.public_id == null ? '' : row.public_id),
+    person_type: String(row.person_type == null ? '' : row.person_type),
+    campus: String(row.campus == null ? '' : row.campus),
+    grade_band: String(row.grade_band == null ? '' : row.grade_band),
+    gender: String(row.gender == null ? '' : row.gender),
+    legal_name: String(row.legal_name == null ? '' : row.legal_name),
+    engagement_score: numOrBlank_(row.engagement_score),
+    extraversion_score: numOrBlank_(row.extraversion_score),
+    newcomer: CampCore.bool(row.newcomer),
+    leader_candidate: CampCore.bool(row.leader_candidate),
+    active: CampCore.bool(row.active)
+  };
+}
+
+// 배정 편집에 필요한 데이터만 반환한다. Participant_Private는 읽지 않으므로 phone/birth/guardian/insurance/note가 응답에 존재할 수 없다.
+function handleGetAssignments_() {
+  var participantRows = tableRows_(getSheetRequired_(CAMP.SHEETS.PARTICIPANTS));
+  var genderById = {};
+  participantRows.forEach(function (row) {
+    var id = String(row.participant_id == null ? '' : row.participant_id).trim();
+    if (id) genderById[id] = String(row.gender == null ? '' : row.gender);
+  });
+
+  var participants = participantRows
+    .filter(function (row) { return String(row.participant_id == null ? '' : row.participant_id).trim(); })
+    .map(assignmentParticipant_);
+
+  var groups = tableRows_(getSheetRequired_(CAMP.SHEETS.GROUPS)).map(function (row) {
+    return {
+      group_id: String(row.group_id == null ? '' : row.group_id),
+      display_name: String(row.display_name == null ? '' : row.display_name),
+      color: String(row.color == null ? '' : row.color),
+      target_size: numOrBlank_(row.target_size),
+      min_size: numOrBlank_(row.min_size),
+      max_size: numOrBlank_(row.max_size),
+      active: CampCore.bool(row.active)
+    };
+  });
+
+  // private_note는 제외한다(방 배정 화면에 비공개 메모 노출 금지).
+  var rooms = tableRows_(getSheetRequired_(CAMP.SHEETS.ROOMS)).map(function (row) {
+    return {
+      room_id: String(row.room_id == null ? '' : row.room_id),
+      display_name: String(row.display_name == null ? '' : row.display_name),
+      capacity: numOrBlank_(row.capacity),
+      gender_scope: String(row.gender_scope == null ? '' : row.gender_scope),
+      floor: String(row.floor == null ? '' : row.floor),
+      active: CampCore.bool(row.active)
+    };
+  });
+
+  var vehicleRows = tableRows_(getSheetRequired_(CAMP.SHEETS.VEHICLES));
+  var vehicleCapacityById = {};
+  var vehicles = vehicleRows.map(function (row) {
+    var id = String(row.vehicle_id == null ? '' : row.vehicle_id);
+    vehicleCapacityById[id] = CampCore.number(row.capacity_total, 0);
+    return {
+      vehicle_id: id,
+      public_label: String(row.public_label == null ? '' : row.public_label),
+      capacity_total: numOrBlank_(row.capacity_total),
+      accessible: CampCore.bool(row.accessible),
+      active: CampCore.bool(row.active)
+    };
+  });
+
+  var trips = tableRows_(getSheetRequired_(CAMP.SHEETS.TRIPS)).map(function (row) {
+    var vehicleId = String(row.vehicle_id == null ? '' : row.vehicle_id);
+    return {
+      trip_id: String(row.trip_id == null ? '' : row.trip_id),
+      direction: String(row.direction == null ? '' : row.direction),
+      depart_at: dateToIso_(row.depart_at),
+      vehicle_id: vehicleId,
+      driver_participant_id: String(row.driver_participant_id == null ? '' : row.driver_participant_id),
+      trip_status: String(row.trip_status == null ? '' : row.trip_status),
+      locked: CampCore.bool(row.locked),
+      capacity: vehicleCapacityById[vehicleId] == null ? 0 : vehicleCapacityById[vehicleId]
+    };
+  });
+
+  // 조 배정 조회 시 gender를 실어 성별 과편중 경고를 활성화한다(없으면 미상 처리).
+  var groupAssignments = tableRows_(getSheetRequired_(CAMP.SHEETS.GROUP_ASSIGNMENTS))
+    .filter(function (row) { return String(row.participant_id == null ? '' : row.participant_id).trim(); })
+    .map(function (row) {
+      var pid = String(row.participant_id);
+      return {
+        assignment_id: String(row.assignment_id == null ? '' : row.assignment_id),
+        participant_id: pid,
+        group_id: String(row.group_id == null ? '' : row.group_id),
+        role: String(row.role == null ? '' : row.role),
+        locked: CampCore.bool(row.locked),
+        gender: genderById[pid] || ''
+      };
+    });
+
+  var roomAssignments = tableRows_(getSheetRequired_(CAMP.SHEETS.ROOM_ASSIGNMENTS))
+    .filter(function (row) { return String(row.participant_id == null ? '' : row.participant_id).trim(); })
+    .map(function (row) {
+      return {
+        room_id: String(row.room_id == null ? '' : row.room_id),
+        participant_id: String(row.participant_id),
+        locked: CampCore.bool(row.locked)
+      };
+    });
+
+  var tripPassengers = tableRows_(getSheetRequired_(CAMP.SHEETS.TRIP_PASSENGERS))
+    .filter(function (row) { return String(row.participant_id == null ? '' : row.participant_id).trim(); })
+    .map(function (row) {
+      return {
+        trip_passenger_id: String(row.trip_passenger_id == null ? '' : row.trip_passenger_id),
+        trip_id: String(row.trip_id == null ? '' : row.trip_id),
+        participant_id: String(row.participant_id),
+        demand_id: String(row.demand_id == null ? '' : row.demand_id),
+        boarding_status: String(row.boarding_status == null ? '' : row.boarding_status),
+        seat_count: numOrBlank_(row.seat_count),
+        locked: CampCore.bool(row.locked)
+      };
+    });
+
+  return jsonResponse_({
+    ok: true,
+    participants: participants,
+    groups: groups,
+    rooms: rooms,
+    vehicles: vehicles,
+    trips: trips,
+    groupAssignments: groupAssignments,
+    roomAssignments: roomAssignments,
+    tripPassengers: tripPassengers
+  });
+}
+
+// payload에서 참가자 id를 뽑고, 참가자 정의 행을 찾는다. 없으면 null(호출부에서 invalid_input).
+function assignmentTargetParticipant_(payload) {
+  if (!payload || typeof payload !== 'object') return null;
+  var participantId = String(payload.participant_id == null ? '' : payload.participant_id).trim();
+  if (!participantId) return null;
+  var row = indexRowsById_(tableRows_(getSheetRequired_(CAMP.SHEETS.PARTICIPANTS)), 'participant_id')[participantId];
+  return row ? { id: participantId, row: row } : null;
+}
+
+// slot 값(group_id/room_id/trip_id)을 정규화한다. 빈문자/null이면 null(해제).
+function assignmentSlot_(value) {
+  var text = String(value == null ? '' : value).trim();
+  return text === '' ? null : text;
+}
+
+// 조 배정 저장: payload {participant_id, group_id|null, role?, locked?}. group_id=null이면 해제. 참가자당 조 1행 보장.
+function handleSaveGroupAssignment_(body, changedBy) {
+  var target = assignmentTargetParticipant_(body.payload);
+  if (!target) return jsonResponse_({ error: 'invalid_input' });
+  var participantId = target.id;
+  var payload = body.payload;
+
+  var groups = tableRows_(getSheetRequired_(CAMP.SHEETS.GROUPS));
+  var participantRows = tableRows_(getSheetRequired_(CAMP.SHEETS.PARTICIPANTS));
+  var genderById = {};
+  participantRows.forEach(function (p) { genderById[String(p.participant_id)] = String(p.gender == null ? '' : p.gender); });
+
+  var assignSheet = getSheetRequired_(CAMP.SHEETS.GROUP_ASSIGNMENTS);
+  var rawAssign = tableRows_(assignSheet);
+  var byAssignId = indexRowsById_(rawAssign, 'assignment_id');
+  var currentAssignments = rawAssign.map(function (row) {
+    var pid = String(row.participant_id);
+    return {
+      assignment_id: String(row.assignment_id == null ? '' : row.assignment_id) || null,
+      participant_id: pid,
+      group_id: String(row.group_id == null ? '' : row.group_id),
+      role: row.role,
+      locked: row.locked,
+      gender: genderById[pid] || ''
+    };
+  });
+
+  // 희망값(role·locked)을 participant 레코드에 병합해 Core에 넘긴다.
+  var participant = {
+    participant_id: participantId,
+    gender: String(target.row.gender == null ? '' : target.row.gender),
+    role: payload.role,
+    locked: payload.locked
+  };
+  var result = CampCore.validateGroupAssignmentChange(participant, assignmentSlot_(payload.group_id), groups, currentAssignments);
+  if (!result.ok) return jsonResponse_({ error: 'validation_blocked', issues: adminBlockingIssues_(result.issues) });
+
+  var plan = result.plan;
+  var idx = headerIndex_(assignSheet);
+  var changeRows = [];
+
+  if (plan.op === 'upsert') {
+    var existing = plan.assignmentId ? byAssignId[String(plan.assignmentId)] : null;
+    var newSlot = { group_id: plan.groupId, role: plan.role, locked: plan.locked };
+    if (existing) {
+      var oldSlot = { group_id: existing.group_id, role: existing.role, locked: existing.locked };
+      setCellIf_(assignSheet, existing._row, idx, 'group_id', plan.groupId);
+      setCellIf_(assignSheet, existing._row, idx, 'role', plan.role);
+      setCellIf_(assignSheet, existing._row, idx, 'locked', plan.locked);
+      setCellIf_(assignSheet, existing._row, idx, 'assignment_source', 'manual');
+      setCellIf_(assignSheet, existing._row, idx, 'updated_at', nowIso_());
+      setCellIf_(assignSheet, existing._row, idx, 'updated_by', changedBy == null ? '' : String(changedBy));
+      changeRows = CampCore.buildAssignmentChangeRows('group_assignment', participantId, oldSlot, newSlot, changedBy);
+    } else {
+      appendObjects_(CAMP.SHEETS.GROUP_ASSIGNMENTS, [{
+        assignment_id: 'ga_' + Utilities.getUuid().replace(/-/g, ''),
+        participant_id: participantId,
+        group_id: plan.groupId,
+        role: plan.role,
+        locked: plan.locked,
+        assignment_source: 'manual',
+        score_delta: '',
+        reason_codes: '',
+        revision: 1,
+        updated_at: nowIso_(),
+        updated_by: changedBy == null ? '' : String(changedBy)
+      }]);
+      changeRows = CampCore.buildAssignmentChangeRows('group_assignment', participantId, {}, newSlot, changedBy);
+    }
+  } else if (plan.op === 'remove') {
+    var removeRow = plan.assignmentId ? byAssignId[String(plan.assignmentId)] : null;
+    if (removeRow) {
+      var oldSlotR = { group_id: removeRow.group_id, role: removeRow.role, locked: removeRow.locked };
+      assignSheet.deleteRow(removeRow._row);
+      changeRows = CampCore.buildAssignmentChangeRows('group_assignment', participantId, oldSlotR, {}, changedBy);
+    }
+  }
+
+  appendChangeLog_(changeRows);
+  return jsonResponse_({ ok: true, warnings: adminWarnings_(result.issues), summary: { entity: 'group_assignment', op: plan.op, participant_id: participantId, group_id: plan.groupId } });
+}
+
+// 방 배정 저장: payload {participant_id, room_id|null, locked?}. null이면 해제. 참가자당 방 1행 보장.
+// Room_Assignments는 배정 id 컬럼이 없어 참가자 id로 행을 찾아 upsert/remove 한다.
+function handleSaveRoomAssignment_(body, changedBy) {
+  var target = assignmentTargetParticipant_(body.payload);
+  if (!target) return jsonResponse_({ error: 'invalid_input' });
+  var participantId = target.id;
+  var payload = body.payload;
+
+  var rooms = tableRows_(getSheetRequired_(CAMP.SHEETS.ROOMS));
+  var participants = tableRows_(getSheetRequired_(CAMP.SHEETS.PARTICIPANTS));
+  var roomSheet = getSheetRequired_(CAMP.SHEETS.ROOM_ASSIGNMENTS);
+  var rawAssign = tableRows_(roomSheet);
+  var currentAssignments = rawAssign.map(function (row) {
+    return { room_id: String(row.room_id == null ? '' : row.room_id), participant_id: String(row.participant_id), locked: row.locked };
+  });
+
+  var participant = {
+    participant_id: participantId,
+    gender: String(target.row.gender == null ? '' : target.row.gender),
+    person_type: String(target.row.person_type == null ? '' : target.row.person_type),
+    active: CampCore.bool(target.row.active),
+    locked: payload.locked
+  };
+  var result = CampCore.validateRoomAssignmentChange(participant, assignmentSlot_(payload.room_id), rooms, currentAssignments, participants);
+  if (!result.ok) return jsonResponse_({ error: 'validation_blocked', issues: adminBlockingIssues_(result.issues) });
+
+  var plan = result.plan;
+  var existingRows = rawAssign.filter(function (row) { return String(row.participant_id) === participantId; });
+  var oldSlot = existingRows.length ? { room_id: existingRows[0].room_id, locked: existingRows[0].locked } : {};
+  var changeRows = [];
+
+  if (plan.op === 'upsert') {
+    // 참가자당 방 1행 보장: 기존 방 배정 행을 모두 제거하고 대상 방으로 재작성한다(정의 행이 아닌 배정 행만).
+    deleteRowsDesc_(roomSheet, existingRows);
+    appendObjects_(CAMP.SHEETS.ROOM_ASSIGNMENTS, [{
+      room_id: plan.roomId,
+      participant_id: participantId,
+      locked: plan.locked,
+      assignment_source: 'manual'
+    }]);
+    changeRows = CampCore.buildAssignmentChangeRows('room_assignment', participantId, oldSlot, { room_id: plan.roomId, locked: plan.locked }, changedBy);
+  } else if (plan.op === 'remove') {
+    deleteRowsDesc_(roomSheet, existingRows);
+    changeRows = CampCore.buildAssignmentChangeRows('room_assignment', participantId, oldSlot, {}, changedBy);
+  }
+
+  appendChangeLog_(changeRows);
+  return jsonResponse_({ ok: true, warnings: adminWarnings_(result.issues), summary: { entity: 'room_assignment', op: plan.op, participant_id: participantId, room_id: plan.roomId } });
+}
+
+// 차량(운행) 탑승 저장: payload {participant_id, trip_id|null, direction, demand_id?, seat_count?, boarding_status?, locked?}.
+// trip_id=null이면 해당 direction 배정 해제. 같은 direction 1건 보장. 정원(운전자 좌석 포함) 검증.
+function handleSaveTripPassenger_(body, changedBy) {
+  var target = assignmentTargetParticipant_(body.payload);
+  if (!target) return jsonResponse_({ error: 'invalid_input' });
+  var participantId = target.id;
+  var payload = body.payload;
+
+  var trips = tableRows_(getSheetRequired_(CAMP.SHEETS.TRIPS));
+  var tripsById = CampCore.indexBy(trips, 'trip_id');
+  var vehiclesById = {};
+  tableRows_(getSheetRequired_(CAMP.SHEETS.VEHICLES)).forEach(function (v) {
+    vehiclesById[String(v.vehicle_id)] = { capacity_total: CampCore.number(v.capacity_total, 0) };
+  });
+
+  var passengerSheet = getSheetRequired_(CAMP.SHEETS.TRIP_PASSENGERS);
+  var rawPassengers = tableRows_(passengerSheet);
+  var byPassengerId = indexRowsById_(rawPassengers, 'trip_passenger_id');
+  var currentPassengers = rawPassengers.map(function (row) {
+    return {
+      trip_passenger_id: String(row.trip_passenger_id == null ? '' : row.trip_passenger_id) || null,
+      trip_id: String(row.trip_id == null ? '' : row.trip_id),
+      participant_id: String(row.participant_id),
+      boarding_status: String(row.boarding_status == null ? '' : row.boarding_status),
+      seat_count: row.seat_count
+    };
+  });
+
+  // demand_id가 주어지면 Travel_Demands에서 시간창·좌석 기본값을 조인한다.
+  var demand = null;
+  var demandId = String(payload.demand_id == null ? '' : payload.demand_id).trim();
+  if (demandId) {
+    demand = indexRowsById_(tableRows_(getSheetRequired_(CAMP.SHEETS.TRAVEL_DEMANDS)), 'demand_id')[demandId] || null;
+  }
+
+  // 희망값(seat_count·boarding_status·locked)을 participant 레코드에 병합한다. seat_count는 빈값이면 넘기지 않아 demand/1로 폴백되게 한다.
+  var participant = { participant_id: participantId, boarding_status: payload.boarding_status, locked: payload.locked };
+  if (payload.seat_count != null && String(payload.seat_count).trim() !== '') participant.seat_count = payload.seat_count;
+
+  var result = CampCore.validateTripPassengerChange(participant, assignmentSlot_(payload.trip_id), payload.direction, trips, vehiclesById, currentPassengers, demand);
+  if (!result.ok) return jsonResponse_({ error: 'validation_blocked', issues: adminBlockingIssues_(result.issues) });
+
+  var plan = result.plan;
+  var idx = headerIndex_(passengerSheet);
+  var changeRows = [];
+
+  function tripDirection_(tripId) {
+    var t = tripsById[String(tripId)];
+    return t ? String(t.direction == null ? '' : t.direction).toUpperCase() : '';
+  }
+
+  if (plan.op === 'upsert') {
+    var existing = plan.assignmentId ? byPassengerId[String(plan.assignmentId)] : null;
+    var newSlot = { trip_id: plan.tripId, direction: plan.direction, seat_count: plan.seatCount, boarding_status: plan.boardingStatus, locked: plan.locked };
+    if (existing) {
+      var oldSlot = { trip_id: existing.trip_id, direction: tripDirection_(existing.trip_id), seat_count: existing.seat_count, boarding_status: existing.boarding_status, locked: existing.locked };
+      setCellIf_(passengerSheet, existing._row, idx, 'trip_id', plan.tripId);
+      setCellIf_(passengerSheet, existing._row, idx, 'boarding_status', plan.boardingStatus);
+      setCellIf_(passengerSheet, existing._row, idx, 'seat_count', plan.seatCount);
+      setCellIf_(passengerSheet, existing._row, idx, 'locked', plan.locked);
+      setCellIf_(passengerSheet, existing._row, idx, 'assignment_source', 'manual');
+      if (demandId) setCellIf_(passengerSheet, existing._row, idx, 'demand_id', demandId);
+      setCellIf_(passengerSheet, existing._row, idx, 'updated_at', nowIso_());
+      changeRows = CampCore.buildAssignmentChangeRows('trip_passenger', participantId, oldSlot, newSlot, changedBy);
+    } else {
+      appendObjects_(CAMP.SHEETS.TRIP_PASSENGERS, [{
+        trip_passenger_id: 'tp_' + Utilities.getUuid().replace(/-/g, ''),
+        trip_id: plan.tripId,
+        participant_id: participantId,
+        demand_id: demandId,
+        boarding_status: plan.boardingStatus,
+        seat_count: plan.seatCount,
+        assignment_source: 'manual',
+        locked: plan.locked,
+        updated_at: nowIso_()
+      }]);
+      changeRows = CampCore.buildAssignmentChangeRows('trip_passenger', participantId, {}, newSlot, changedBy);
+    }
+  } else if (plan.op === 'remove') {
+    var removeRow = plan.assignmentId ? byPassengerId[String(plan.assignmentId)] : null;
+    if (removeRow) {
+      var oldSlotR = { trip_id: removeRow.trip_id, direction: tripDirection_(removeRow.trip_id), seat_count: removeRow.seat_count, boarding_status: removeRow.boarding_status, locked: removeRow.locked };
+      passengerSheet.deleteRow(removeRow._row);
+      changeRows = CampCore.buildAssignmentChangeRows('trip_passenger', participantId, oldSlotR, {}, changedBy);
+    }
+  }
+
+  appendChangeLog_(changeRows);
+  return jsonResponse_({ ok: true, warnings: adminWarnings_(result.issues), summary: { entity: 'trip_passenger', op: plan.op, participant_id: participantId, trip_id: plan.tripId, direction: plan.direction } });
+}
+
+// 배정 감사행을 change_id/changed_at 스탬프 후 Change_Log에 append 한다(빈 배열이면 아무것도 하지 않음).
+function appendChangeLog_(changeRows) {
+  var changeLog = stampChangeRows_(changeRows);
+  if (changeLog.length) appendObjects_(CAMP.SHEETS.CHANGE_LOG, changeLog);
+}
+
+// 주어진 배정 행들을 행번호 내림차순으로 물리 삭제한다(배정 행만 — 참가자/조/방/차량 정의 행은 호출부가 넘기지 않는다).
+function deleteRowsDesc_(sheet, rows) {
+  (rows || []).slice().sort(function (a, b) { return b._row - a._row; }).forEach(function (row) { sheet.deleteRow(row._row); });
 }
 
 function jsonResponse_(payload) {

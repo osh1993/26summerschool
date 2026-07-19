@@ -944,4 +944,218 @@ assert.ok(createFields.includes('campus'));
 assert.ok(createFields.includes('phone'));
 assert.strictEqual(createRows.find((r) => r.field_name === 'phone').new_value, '[REDACTED]');
 
+// ── Phase C: validateGroupAssignmentChange ───────────────────────────────
+const gcGroups = [
+  { group_id: 'G01', display_name: '1조', target_size: 6, max_size: 8, active: true },
+  { group_id: 'G02', display_name: '2조', target_size: 6, max_size: 8, active: true },
+  { group_id: 'G09', display_name: '폐조', active: false }
+];
+// 신규 upsert(기존 배정 없음): plan.op upsert, assignmentId null(신규), role 기본 member
+const gcNew = Core.validateGroupAssignmentChange({ participant_id: 'pt_A' }, 'G01', gcGroups, []);
+assert.strictEqual(gcNew.ok, true);
+assert.deepStrictEqual(gcNew.plan, { op: 'upsert', assignmentId: null, participantId: 'pt_A', groupId: 'G01', role: 'member', locked: false });
+// 이동(기존 G01 → G02): 기존 assignment_id 재사용, role 반영
+const gcMove = Core.validateGroupAssignmentChange(
+  { participant_id: 'pt_A', role: 'leader' }, 'G02', gcGroups,
+  [{ assignment_id: 'GA1', participant_id: 'pt_A', group_id: 'G01', role: 'member', locked: false }]
+);
+assert.strictEqual(gcMove.ok, true);
+assert.strictEqual(gcMove.plan.op, 'upsert');
+assert.strictEqual(gcMove.plan.assignmentId, 'GA1'); // 기존 id 유지
+assert.strictEqual(gcMove.plan.role, 'leader');
+assert.ok(!ruleCodes(gcMove.issues).includes('MULTIPLE_ACTIVE_GROUPS')); // 단일 행 이동은 중복 아님
+// 해제(remove): groupId null, 기존 id로 제거
+const gcRemove = Core.validateGroupAssignmentChange({ participant_id: 'pt_A' }, null, gcGroups,
+  [{ assignment_id: 'GA1', participant_id: 'pt_A', group_id: 'G01' }]);
+assert.strictEqual(gcRemove.plan.op, 'remove');
+assert.strictEqual(gcRemove.plan.assignmentId, 'GA1');
+assert.strictEqual(gcRemove.plan.groupId, null);
+// 해제 대상 없음 → noop
+assert.strictEqual(Core.validateGroupAssignmentChange({ participant_id: 'pt_Z' }, '', gcGroups, []).plan.op, 'noop');
+// noop: 이미 대상 조에 같은 role/locked
+const gcNoop = Core.validateGroupAssignmentChange(
+  { participant_id: 'pt_A', role: 'member' }, 'G01', gcGroups,
+  [{ assignment_id: 'GA1', participant_id: 'pt_A', group_id: 'G01', role: 'member', locked: false }]
+);
+assert.strictEqual(gcNoop.plan.op, 'noop');
+assert.strictEqual(gcNoop.plan.assignmentId, 'GA1');
+// 존재하지 않는 조(차단)
+const gcUnknown = Core.validateGroupAssignmentChange({ participant_id: 'pt_A' }, 'G404', gcGroups, []);
+assert.strictEqual(gcUnknown.ok, false);
+assert.ok(ruleCodes(gcUnknown.issues).includes('GROUP_TARGET_UNKNOWN'));
+// 비활성 조(차단)
+assert.ok(ruleCodes(Core.validateGroupAssignmentChange({ participant_id: 'pt_A' }, 'G09', gcGroups, []).issues).includes('GROUP_TARGET_INACTIVE'));
+// 잘못된 role(차단)
+const gcBadRole = Core.validateGroupAssignmentChange({ participant_id: 'pt_A', role: 'captain' }, 'G01', gcGroups, []);
+assert.strictEqual(gcBadRole.ok, false);
+assert.ok(ruleCodes(gcBadRole.issues).includes('GROUP_ROLE_INVALID'));
+// 참가자당 조 중복(차단): 기존 두 개 조 배정 상태
+const gcDup = Core.validateGroupAssignmentChange({ participant_id: 'pt_A' }, 'G01', gcGroups, [
+  { assignment_id: 'GA1', participant_id: 'pt_A', group_id: 'G01' },
+  { assignment_id: 'GA2', participant_id: 'pt_A', group_id: 'G02' }
+]);
+assert.strictEqual(gcDup.ok, false);
+assert.ok(ruleCodes(gcDup.issues).includes('MULTIPLE_ACTIVE_GROUPS'));
+// max_size 초과 경고(비차단): max 2에 이미 2명 + 신규
+const gcMax = Core.validateGroupAssignmentChange({ participant_id: 'pt_NEW' }, 'GX',
+  [{ group_id: 'GX', display_name: 'X', target_size: 1, max_size: 2, active: true }],
+  [{ assignment_id: 'a', participant_id: 'p1', group_id: 'GX' }, { assignment_id: 'b', participant_id: 'p2', group_id: 'GX' }]);
+assert.strictEqual(gcMax.ok, true);
+assert.ok(ruleCodes(gcMax.issues).includes('GROUP_MAX_SIZE_EXCEEDED'));
+// target_size 초과 경고(비차단, max 이내)
+const gcTarget = Core.validateGroupAssignmentChange({ participant_id: 'pt_NEW' }, 'GY',
+  [{ group_id: 'GY', display_name: 'Y', target_size: 1, max_size: 9, active: true }],
+  [{ assignment_id: 'a', participant_id: 'p1', group_id: 'GY' }]);
+assert.ok(ruleCodes(gcTarget.issues).includes('GROUP_TARGET_SIZE_EXCEEDED'));
+assert.ok(!ruleCodes(gcTarget.issues).includes('GROUP_MAX_SIZE_EXCEEDED'));
+// 성별 과편중 경고(비차단): 대상 조에 남 4 + 남 참가자 = 5/5
+const gcGender = Core.validateGroupAssignmentChange({ participant_id: 'pt_M', gender: 'male' }, 'GZ',
+  [{ group_id: 'GZ', display_name: 'Z', target_size: 10, max_size: 10, active: true }],
+  [
+    { assignment_id: '1', participant_id: 'm1', group_id: 'GZ', gender: 'male' },
+    { assignment_id: '2', participant_id: 'm2', group_id: 'GZ', gender: 'male' },
+    { assignment_id: '3', participant_id: 'm3', group_id: 'GZ', gender: 'male' },
+    { assignment_id: '4', participant_id: 'm4', group_id: 'GZ', gender: 'male' }
+  ]);
+assert.strictEqual(gcGender.ok, true);
+assert.ok(ruleCodes(gcGender.issues).includes('GROUP_GENDER_IMBALANCE'));
+// 잠금 이동 경고(비차단): 잠금된 기존 배정을 다른 조로 이동
+const gcLocked = Core.validateGroupAssignmentChange({ participant_id: 'pt_A' }, 'G02', gcGroups,
+  [{ assignment_id: 'GA1', participant_id: 'pt_A', group_id: 'G01', role: 'member', locked: true }]);
+assert.strictEqual(gcLocked.ok, true);
+assert.ok(ruleCodes(gcLocked.issues).includes('GROUP_LOCKED_CONFLICT'));
+
+// ── Phase C: validateTripPassengerChange ─────────────────────────────────
+const tcTrips = [
+  { trip_id: 'T_IN', direction: 'IN', vehicle_id: 'V1', driver_participant_id: 'pt_DRV', depart_at: '2026-07-23T10:00:00+09:00', trip_status: 'confirmed' },
+  { trip_id: 'T_IN2', direction: 'IN', vehicle_id: 'V2', driver_participant_id: 'pt_DRV2', depart_at: '2026-07-23T14:00:00+09:00', trip_status: 'confirmed' },
+  { trip_id: 'T_OUT', direction: 'OUT', vehicle_id: 'V1', driver_participant_id: 'pt_DRV', depart_at: '2026-07-25T10:00:00+09:00', trip_status: 'confirmed' },
+  { trip_id: 'T_CX', direction: 'IN', vehicle_id: 'V1', driver_participant_id: 'pt_DRV', depart_at: '2026-07-23T10:00:00+09:00', trip_status: 'cancelled' }
+];
+const tcVehicles = { V1: { vehicle_id: 'V1', capacity_total: 2 }, V2: { vehicle_id: 'V2', capacity_total: 10 } };
+// 정상 upsert(신규): plan 필드 확인
+const tcNew = Core.validateTripPassengerChange({ participant_id: 'pt_A' }, 'T_IN', 'IN', tcTrips, tcVehicles, [], null);
+assert.strictEqual(tcNew.ok, true);
+assert.strictEqual(tcNew.plan.op, 'upsert');
+assert.strictEqual(tcNew.plan.assignmentId, null);
+assert.strictEqual(tcNew.plan.tripId, 'T_IN');
+assert.strictEqual(tcNew.plan.direction, 'IN');
+assert.strictEqual(tcNew.plan.seatCount, 1);
+// 정원 초과(운전자 좌석 포함): V1 정원 2 → 승객석 1. 기존 승객 1 + 신규 1 = 2 > 1
+const tcOver = Core.validateTripPassengerChange({ participant_id: 'pt_B' }, 'T_IN', 'IN', tcTrips, tcVehicles,
+  [{ trip_passenger_id: 'TP1', trip_id: 'T_IN', participant_id: 'pt_A', boarding_status: 'confirmed', seat_count: 1 }], null);
+assert.strictEqual(tcOver.ok, false);
+assert.ok(ruleCodes(tcOver.issues).includes('TRIP_OVER_CAPACITY'));
+// 같은 direction 2건(차단): 이미 두 IN 운행에 배정된 상태
+const tcDupDir = Core.validateTripPassengerChange({ participant_id: 'pt_A' }, 'T_IN', 'IN', tcTrips, tcVehicles, [
+  { trip_passenger_id: 'TP8', trip_id: 'T_IN', participant_id: 'pt_A', boarding_status: 'confirmed', seat_count: 1 },
+  { trip_passenger_id: 'TP9', trip_id: 'T_IN2', participant_id: 'pt_A', boarding_status: 'confirmed', seat_count: 1 }
+], null);
+assert.strictEqual(tcDupDir.ok, false);
+assert.ok(ruleCodes(tcDupDir.issues).includes('TRIP_DUPLICATE_DIRECTION'));
+// 같은 direction 내 단일 이동(허용): 기존 IN(T_IN) → IN(T_IN2), 재사용
+const tcMove = Core.validateTripPassengerChange({ participant_id: 'pt_A' }, 'T_IN2', 'IN', tcTrips, tcVehicles,
+  [{ trip_passenger_id: 'TP7', trip_id: 'T_IN', participant_id: 'pt_A', boarding_status: 'confirmed', seat_count: 1 }], null);
+assert.strictEqual(tcMove.ok, true);
+assert.strictEqual(tcMove.plan.assignmentId, 'TP7');
+assert.strictEqual(tcMove.plan.tripId, 'T_IN2');
+assert.ok(!ruleCodes(tcMove.issues).includes('TRIP_DUPLICATE_DIRECTION'));
+// 취소 운행(차단)
+assert.ok(ruleCodes(Core.validateTripPassengerChange({ participant_id: 'pt_A' }, 'T_CX', 'IN', tcTrips, tcVehicles, [], null).issues).includes('TRIP_TARGET_INACTIVE'));
+// 존재하지 않는 운행(차단)
+assert.ok(ruleCodes(Core.validateTripPassengerChange({ participant_id: 'pt_A' }, 'T_404', 'IN', tcTrips, tcVehicles, [], null).issues).includes('TRIP_TARGET_UNKNOWN'));
+// 운전자를 승객으로(차단)
+assert.ok(ruleCodes(Core.validateTripPassengerChange({ participant_id: 'pt_DRV' }, 'T_IN', 'IN', tcTrips, tcVehicles, [], null).issues).includes('TRIP_DRIVER_AS_PASSENGER'));
+// 시간창 위반 경고(비차단): 운행 출발이 demand latest 이후
+const tcWindow = Core.validateTripPassengerChange({ participant_id: 'pt_A' }, 'T_IN', 'IN', tcTrips, tcVehicles, [],
+  { earliest_depart_at: '2026-07-23T07:00:00+09:00', latest_depart_at: '2026-07-23T09:00:00+09:00' });
+assert.strictEqual(tcWindow.ok, true);
+assert.ok(ruleCodes(tcWindow.issues).includes('TRIP_TIME_WINDOW'));
+// 해제(remove): 해당 direction 행 제거
+const tcRemove = Core.validateTripPassengerChange({ participant_id: 'pt_A' }, null, 'IN', tcTrips, tcVehicles,
+  [{ trip_passenger_id: 'TP7', trip_id: 'T_IN', participant_id: 'pt_A', boarding_status: 'confirmed' }], null);
+assert.strictEqual(tcRemove.plan.op, 'remove');
+assert.strictEqual(tcRemove.plan.assignmentId, 'TP7');
+assert.strictEqual(tcRemove.plan.tripId, null);
+// noop: 동일 좌석/상태/잠금
+const tcNoop = Core.validateTripPassengerChange({ participant_id: 'pt_A', boarding_status: 'confirmed' }, 'T_IN', 'IN', tcTrips, tcVehicles,
+  [{ trip_passenger_id: 'TP7', trip_id: 'T_IN', participant_id: 'pt_A', boarding_status: 'confirmed', seat_count: 1, locked: false }], null);
+assert.strictEqual(tcNoop.plan.op, 'noop');
+
+// ── Phase C: validateRoomAssignmentChange(단건 래퍼) ─────────────────────
+const rcRooms = [
+  { room_id: 'R01', display_name: '101', capacity: 2, gender_scope: 'male', active: true },
+  { room_id: 'R02', display_name: '201', capacity: 1, gender_scope: 'female', active: true }
+];
+const rcParts = [
+  { participant_id: 'p1', gender: 'male', active: true },
+  { participant_id: 'p2', gender: 'female', active: true },
+  { participant_id: 'p3', gender: 'male', active: true }
+];
+// 정상 upsert: plan 형태 + 다른 참가자 미배정 경고는 필터링되어 이 참가자 이슈만
+const rcOk = Core.validateRoomAssignmentChange({ participant_id: 'p1', gender: 'male' }, 'R01', rcRooms, [], rcParts);
+assert.strictEqual(rcOk.ok, true);
+assert.deepStrictEqual(rcOk.plan, { op: 'upsert', assignmentId: null, participantId: 'p1', roomId: 'R01', locked: false });
+assert.ok(!ruleCodes(rcOk.issues).includes('ROOM_UNASSIGNED')); // p2/p3 미배정 경고 제외
+// 성별 불일치(차단): 남성 방에 여성
+const rcGender = Core.validateRoomAssignmentChange({ participant_id: 'p2', gender: 'female' }, 'R01', rcRooms, [], rcParts);
+assert.strictEqual(rcGender.ok, false);
+assert.ok(ruleCodes(rcGender.issues).includes('ROOM_GENDER_MISMATCH'));
+// 정원 초과(차단): R02 정원 1에 기존 1 + 신규
+const rcOver = Core.validateRoomAssignmentChange({ participant_id: 'p2', gender: 'female' }, 'R02', rcRooms,
+  [{ room_assignment_id: 'RA1', room_id: 'R02', participant_id: 'pF', locked: false }],
+  rcParts.concat([{ participant_id: 'pF', gender: 'female', active: true }]));
+assert.strictEqual(rcOver.ok, false);
+assert.ok(ruleCodes(rcOver.issues).includes('ROOM_OVER_CAPACITY'));
+// noop(재사용 id): 이미 대상 방
+const rcExisting = [{ room_assignment_id: 'RA5', room_id: 'R01', participant_id: 'p1', locked: false }];
+const rcNoop = Core.validateRoomAssignmentChange({ participant_id: 'p1', gender: 'male' }, 'R01', rcRooms, rcExisting, rcParts);
+assert.strictEqual(rcNoop.plan.op, 'noop');
+assert.strictEqual(rcNoop.plan.assignmentId, 'RA5');
+// 해제(remove)
+const rcRemove = Core.validateRoomAssignmentChange({ participant_id: 'p1' }, '', rcRooms, rcExisting, rcParts);
+assert.strictEqual(rcRemove.plan.op, 'remove');
+assert.strictEqual(rcRemove.plan.assignmentId, 'RA5');
+assert.strictEqual(rcRemove.plan.roomId, null);
+
+// ── Phase C: buildAssignmentChangeRows ───────────────────────────────────
+// 조 배정 변경: 변경 필드만, 내부 ID/비민감 값만
+const acGroup = Core.buildAssignmentChangeRows('group_assignment', 'pt_A',
+  { group_id: 'G01', role: 'member', locked: false },
+  { group_id: 'G02', role: 'member', locked: true }, 'admin@example.com');
+const acGroupByField = {};
+acGroup.forEach((r) => { acGroupByField[r.field_name] = r; });
+assert.strictEqual(acGroupByField.role, undefined); // 미변경 필드 제외
+assert.strictEqual(acGroupByField.group_id.old_value, 'G01');
+assert.strictEqual(acGroupByField.group_id.new_value, 'G02');
+assert.strictEqual(acGroupByField.locked.old_value, 'FALSE'); // bool → TRUE/FALSE 표현
+assert.strictEqual(acGroupByField.locked.new_value, 'TRUE');
+acGroup.forEach((r) => {
+  assert.strictEqual(r.entity_type, 'group_assignment');
+  assert.strictEqual(r.entity_id, 'pt_A');
+  assert.strictEqual(r.changed_by, 'admin@example.com');
+  assert.strictEqual(r.reason, 'admin_web');
+});
+// PII 없음: 어떤 값에도 전화 패턴이 없어야 한다(내부 ID만)
+assert.ok(!/010[- ]?\d{3,4}[- ]?\d{4}/.test(acGroup.map((r) => String(r.old_value) + '|' + String(r.new_value)).join(',')));
+// 변경 없음 → 빈 배열
+assert.deepStrictEqual(Core.buildAssignmentChangeRows('group_assignment', 'pt_A',
+  { group_id: 'G01', role: 'member', locked: false }, { group_id: 'G01', role: 'member', locked: false }, 'x'), []);
+// 해제 케이스: new 슬롯 null → 내부 ID는 old에만, new는 빈값
+const acRemove = Core.buildAssignmentChangeRows('trip_passenger', 'pt_A',
+  { trip_id: 'T_IN', direction: 'IN', seat_count: 1, boarding_status: 'confirmed', locked: false }, null, 'admin');
+const acRemoveByField = {};
+acRemove.forEach((r) => { acRemoveByField[r.field_name] = r; });
+assert.strictEqual(acRemoveByField.trip_id.old_value, 'T_IN');
+assert.strictEqual(acRemoveByField.trip_id.new_value, '');
+assert.strictEqual(acRemoveByField.boarding_status.new_value, '');
+assert.strictEqual(acRemoveByField.locked, undefined); // false→false 미변경 제외
+// 방 배정 변경: room_id만
+const acRoom = Core.buildAssignmentChangeRows('room_assignment', 'pt_A', {}, { room_id: 'R01', locked: false }, 'admin');
+assert.strictEqual(acRoom.length, 1);
+assert.strictEqual(acRoom[0].field_name, 'room_id');
+assert.strictEqual(acRoom[0].new_value, 'R01');
+// 알 수 없는 entityType → 빈 배열
+assert.deepStrictEqual(Core.buildAssignmentChangeRows('unknown', 'pt_A', { x: 1 }, { x: 2 }, 'admin'), []);
+
 console.log('Core tests passed');
