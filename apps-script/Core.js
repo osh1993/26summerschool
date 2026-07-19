@@ -1141,6 +1141,100 @@ var CampCore = (function () {
     });
   }
 
+  // ── 참석 여부(자유텍스트) → 세션 present/absent 순수 로직 ─────────────────
+  // 구글폼 '참석 여부' 자유텍스트를 해석해 Attendance 탭 세션(present/absent)으로 반영하기 위한 순수 함수들.
+  // 시트 I/O는 08_Attendance.gs가 담당하고, 여기서는 파싱·매핑·재조정 계획만 결정한다.
+
+  // 참석 여부 텍스트를 { full, days }로 파싱한다.
+  //  - '전일'/'Full'(대소문자 무관) 포함 → 전 일정 참석(full:true).
+  //  - 그 외에는 'N일' 패턴의 숫자(달력 일, day-of-month)들을 순서대로 수집(중복 제거).
+  //  - 빈값/미인식 → { full:false, days:[] }.
+  function parseAttendanceSpec(text) {
+    var raw = String(text == null ? '' : text);
+    if (/전일|full/i.test(raw)) return { full: true, days: [] };
+    var days = [];
+    var seen = {};
+    var re = /(\d+)\s*일/g;
+    var match;
+    while ((match = re.exec(raw)) !== null) {
+      var day = Number(match[1]);
+      if (Number.isFinite(day) && !seen[day]) { seen[day] = true; days.push(day); }
+    }
+    return { full: false, days: days };
+  }
+
+  // 행사 시작일~종료일을 순회해 { [dayOfMonth]: dayIndex(1..N) } 매핑을 만든다.
+  // 날짜 파싱 실패 또는 시작>종료면 빈 객체. DST 영향을 피하려고 UTC 밀리초로 하루씩 진행한다.
+  function buildDayIndexByDayOfMonth(startDateIso, endDateIso) {
+    var startMatch = String(startDateIso == null ? '' : startDateIso).match(/(\d{4})-(\d{1,2})-(\d{1,2})/);
+    var endMatch = String(endDateIso == null ? '' : endDateIso).match(/(\d{4})-(\d{1,2})-(\d{1,2})/);
+    if (!startMatch || !endMatch) return {};
+    var start = Date.UTC(Number(startMatch[1]), Number(startMatch[2]) - 1, Number(startMatch[3]));
+    var end = Date.UTC(Number(endMatch[1]), Number(endMatch[2]) - 1, Number(endMatch[3]));
+    if (!(start <= end)) return {};
+    var dayMillis = 24 * 60 * 60 * 1000;
+    var map = {};
+    var dayIndex = 1;
+    for (var cursor = start; cursor <= end && dayIndex <= 366; cursor += dayMillis) {
+      map[new Date(cursor).getUTCDate()] = dayIndex;
+      dayIndex += 1;
+    }
+    return map;
+  }
+
+  // 파싱된 spec을 present로 표시할 slot_id 배열로 변환한다.
+  //  - full: 전체 slot_id.
+  //  - 부분: days의 각 N → dayIndexByDayOfMonth[N] → 그 day_index의 슬롯 slot_id들(시트 순서 유지).
+  function attendanceSlotIds(spec, timeSlots, dayIndexByDayOfMonth) {
+    spec = spec || {};
+    var slots = timeSlots || [];
+    if (spec.full) return slots.map(function (slot) { return String(slot.slot_id); });
+    var map = dayIndexByDayOfMonth || {};
+    var wantedDayIndex = {};
+    (spec.days || []).forEach(function (dayOfMonth) {
+      var dayIndex = map[dayOfMonth];
+      if (dayIndex != null) wantedDayIndex[String(dayIndex)] = true;
+    });
+    var result = [];
+    slots.forEach(function (slot) {
+      if (wantedDayIndex[String(number(slot.day_index, 0))]) result.push(String(slot.slot_id));
+    });
+    return result;
+  }
+
+  // 한 참가자의 Attendance를 어떻게 바꿀지 순수하게 계획한다(멱등).
+  //  - allSlotIds의 각 슬롯을 present(=presentSlotIds에 포함) 또는 absent로 목표 설정.
+  //  - locked 행은 절대 건드리지 않고 lockedSkipped로 보고한다.
+  //  - 목표와 현재가 같으면 unchanged, 다르면 toSetPresent/toSetAbsent(기존 행 갱신 또는 신규 생성).
+  function reconcileAttendance(existingRows, participantId, presentSlotIds, allSlotIds) {
+    var pid = String(participantId);
+    var presentSet = {};
+    (presentSlotIds || []).forEach(function (slotId) { presentSet[String(slotId)] = true; });
+    var bySlot = {};
+    (existingRows || []).forEach(function (row) {
+      if (String(row.participant_id) !== pid) return;
+      bySlot[String(row.slot_id)] = row;
+    });
+    var toSetPresent = [], toSetAbsent = [], unchanged = [], lockedSkipped = [];
+    (allSlotIds || []).forEach(function (slotId) {
+      var sid = String(slotId);
+      var desired = presentSet[sid] ? 'present' : 'absent';
+      var existing = bySlot[sid];
+      if (existing && bool(existing.locked)) { lockedSkipped.push(sid); return; }
+      var current = existing ? String(existing.presence_status) : null;
+      if (current === desired) { unchanged.push(sid); return; }
+      var item = {
+        slot_id: sid,
+        participant_id: pid,
+        presence_status: desired,
+        row: existing ? (existing._row || null) : null,
+        isNew: !existing
+      };
+      (desired === 'present' ? toSetPresent : toSetAbsent).push(item);
+    });
+    return { toSetPresent: toSetPresent, toSetAbsent: toSetAbsent, unchanged: unchanged, lockedSkipped: lockedSkipped };
+  }
+
   return {
     issue: issue,
     bool: bool,
@@ -1169,7 +1263,11 @@ var CampCore = (function () {
     sessionPartLabel: sessionPartLabel,
     tripTimeBucket: tripTimeBucket,
     presentSlotIds: presentSlotIds,
-    buildStandardTimeSlots: buildStandardTimeSlots
+    buildStandardTimeSlots: buildStandardTimeSlots,
+    parseAttendanceSpec: parseAttendanceSpec,
+    buildDayIndexByDayOfMonth: buildDayIndexByDayOfMonth,
+    attendanceSlotIds: attendanceSlotIds,
+    reconcileAttendance: reconcileAttendance
   };
 }());
 

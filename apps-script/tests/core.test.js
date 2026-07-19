@@ -601,4 +601,85 @@ assert.ok(ruleCodes(Core.validateInternalSnapshot(internalEmail, [])).includes('
 const internalCanary = internalWithRealIds(); internalCanary.notices.push({ notice_id: 'N6', title: '안내', message: 'PRIVATE-CANARY', severity: 'info' });
 assert.ok(ruleCodes(Core.validateInternalSnapshot(internalCanary, ['PRIVATE-CANARY'])).includes('PUBLIC_FIELD_LEAK'));
 
+// ── 참석 여부(자유텍스트) → 세션 present/absent 순수 로직 ──────────────────
+// parseAttendanceSpec: 전일/Full, 단일, 복수, 빈값, 미인식, 중복 제거
+assert.deepStrictEqual(Core.parseAttendanceSpec('전일 참석(Full)'), { full: true, days: [] });
+assert.deepStrictEqual(Core.parseAttendanceSpec('전일'), { full: true, days: [] });
+assert.deepStrictEqual(Core.parseAttendanceSpec('Full attendance'), { full: true, days: [] }); // 대소문자 무관
+assert.deepStrictEqual(Core.parseAttendanceSpec('부분 참석 (3일)'), { full: false, days: [3] });
+assert.deepStrictEqual(Core.parseAttendanceSpec('부분 참석 (3일), 부분 참석 (4일)'), { full: false, days: [3, 4] });
+assert.deepStrictEqual(Core.parseAttendanceSpec('부분 참석 (4일), 부분 참석 (5일)'), { full: false, days: [4, 5] });
+assert.deepStrictEqual(Core.parseAttendanceSpec('부분 참석 (4일), 부분 참석 (4일)'), { full: false, days: [4] }); // 중복 제거
+assert.deepStrictEqual(Core.parseAttendanceSpec(''), { full: false, days: [] });
+assert.deepStrictEqual(Core.parseAttendanceSpec('미정'), { full: false, days: [] });
+assert.deepStrictEqual(Core.parseAttendanceSpec(null), { full: false, days: [] });
+
+// buildDayIndexByDayOfMonth: 기본 구간, ISO 시각 포함, 월 경계, 무효 입력
+assert.deepStrictEqual(Core.buildDayIndexByDayOfMonth('2026-08-03', '2026-08-05'), { 3: 1, 4: 2, 5: 3 });
+assert.deepStrictEqual(Core.buildDayIndexByDayOfMonth('2026-08-03T00:00:00+09:00', '2026-08-05T18:00:00+09:00'), { 3: 1, 4: 2, 5: 3 });
+assert.deepStrictEqual(Core.buildDayIndexByDayOfMonth('2026-07-31', '2026-08-02'), { 31: 1, 1: 2, 2: 3 }); // 월 경계
+assert.deepStrictEqual(Core.buildDayIndexByDayOfMonth('2026-08-03', '2026-08-03'), { 3: 1 });              // 단일 일
+assert.deepStrictEqual(Core.buildDayIndexByDayOfMonth('', ''), {});                                        // 빈값
+assert.deepStrictEqual(Core.buildDayIndexByDayOfMonth('2026-08-05', '2026-08-03'), {});                    // 시작>종료 무효
+
+// attendanceSlotIds: full=7개, 부분=해당 일차 슬롯, 미매핑 날짜=빈 배열
+const attSlots = Core.buildStandardTimeSlots('2026-summer'); // 7슬롯, day_index 1..3
+const dayMap = Core.buildDayIndexByDayOfMonth('2026-08-03', '2026-08-05'); // {3:1,4:2,5:3}
+assert.strictEqual(Core.attendanceSlotIds({ full: true, days: [] }, attSlots, dayMap).length, 7);
+assert.deepStrictEqual(
+  Core.attendanceSlotIds({ full: false, days: [3] }, attSlots, dayMap), // 3일 → day_index 1 → 1일차 3슬롯
+  ['S_D1_MORNING', 'S_D1_AFTERNOON', 'S_D1_NIGHT']
+);
+assert.deepStrictEqual(
+  Core.attendanceSlotIds({ full: false, days: [5] }, attSlots, dayMap), // 5일 → day_index 3 → 3일차 1슬롯
+  ['S_D3_MORNING']
+);
+assert.deepStrictEqual(
+  Core.attendanceSlotIds({ full: false, days: [3, 4] }, attSlots, dayMap).sort(),
+  ['S_D1_AFTERNOON', 'S_D1_MORNING', 'S_D1_NIGHT', 'S_D2_AFTERNOON', 'S_D2_MORNING', 'S_D2_NIGHT']
+);
+assert.deepStrictEqual(Core.attendanceSlotIds({ full: false, days: [9] }, attSlots, dayMap), []); // 매핑 없는 날짜
+
+// reconcileAttendance: present/absent 전환, locked 보존, 멱등, 참가자 필터
+const allIds = attSlots.map((s) => s.slot_id);
+// 신규 참가자(기존 행 없음): 1일차만 present → present 3 + absent 4(모두 신규)
+const rec1 = Core.reconcileAttendance([], 'p1', ['S_D1_MORNING', 'S_D1_AFTERNOON', 'S_D1_NIGHT'], allIds);
+assert.strictEqual(rec1.toSetPresent.length, 3);
+assert.strictEqual(rec1.toSetAbsent.length, 4);
+assert.ok(rec1.toSetPresent.concat(rec1.toSetAbsent).every((i) => i.isNew));
+// 멱등: 목표와 동일한 기존 행이면 unchanged 7, 변경 0
+const existingAtt = allIds.map((id, i) => ({
+  _row: i + 2, participant_id: 'p1', slot_id: id,
+  presence_status: ['S_D1_MORNING', 'S_D1_AFTERNOON', 'S_D1_NIGHT'].includes(id) ? 'present' : 'absent',
+  locked: false
+}));
+const rec2 = Core.reconcileAttendance(existingAtt, 'p1', ['S_D1_MORNING', 'S_D1_AFTERNOON', 'S_D1_NIGHT'], allIds);
+assert.strictEqual(rec2.unchanged.length, 7);
+assert.strictEqual(rec2.toSetPresent.length, 0);
+assert.strictEqual(rec2.toSetAbsent.length, 0);
+// present↔absent 전환: 이제 2일차 오전만 present
+const rec3 = Core.reconcileAttendance(existingAtt, 'p1', ['S_D2_MORNING'], allIds);
+assert.deepStrictEqual(rec3.toSetPresent.map((i) => i.slot_id), ['S_D2_MORNING']);
+assert.deepStrictEqual(rec3.toSetAbsent.map((i) => i.slot_id).sort(), ['S_D1_AFTERNOON', 'S_D1_MORNING', 'S_D1_NIGHT']);
+rec3.toSetPresent.concat(rec3.toSetAbsent).forEach((i) => assert.strictEqual(i.isNew, false)); // 기존 행 갱신
+// locked 보존: S_D1_MORNING이 locked면 전부 absent 목표라도 건드리지 않음
+const lockedAtt = existingAtt.map((r) => r.slot_id === 'S_D1_MORNING' ? Object.assign({}, r, { locked: true }) : r);
+const rec4 = Core.reconcileAttendance(lockedAtt, 'p1', [], allIds);
+assert.deepStrictEqual(rec4.lockedSkipped, ['S_D1_MORNING']);
+assert.ok(!rec4.toSetPresent.concat(rec4.toSetAbsent).some((i) => i.slot_id === 'S_D1_MORNING'));
+// 다른 참가자 행은 무시(p1 신규로 처리)
+const rec5 = Core.reconcileAttendance(
+  [{ _row: 2, participant_id: 'pX', slot_id: 'S_D1_MORNING', presence_status: 'present', locked: false }],
+  'p1', ['S_D1_MORNING'], ['S_D1_MORNING']
+);
+assert.strictEqual(rec5.toSetPresent.length, 1);
+assert.strictEqual(rec5.toSetPresent[0].isNew, true);
+
+// 통합: parse → slotIds → reconcile(멱등) 파이프라인
+const specFull = Core.parseAttendanceSpec('전일 참석(Full)');
+const fullIds = Core.attendanceSlotIds(specFull, attSlots, dayMap);
+const recFull = Core.reconcileAttendance([], 'p2', fullIds, allIds);
+assert.strictEqual(recFull.toSetPresent.length, 7);
+assert.strictEqual(recFull.toSetAbsent.length, 0);
+
 console.log('Core tests passed');

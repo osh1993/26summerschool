@@ -75,6 +75,8 @@ var CAMP = Object.freeze({
     ROOM_COUNT: '8',
     RAW_STUDENT_SHEET: 'Form_Raw_Students',
     RAW_STAFF_SHEET: 'Form_Raw_Staff',
+    // 원본(학생/교사) 시트에서 '참석 여부' 자유텍스트 열을 찾는 헤더명. 이 텍스트를 세션별 present/absent로 반영한다.
+    ATTENDANCE_SOURCE_HEADER: '참석 여부',
     LAST_SYNC_ROW_STUDENTS: '1',
     LAST_SYNC_ROW_STAFF: '1',
     ROSTER_SOURCE_MODE: '',
