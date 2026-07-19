@@ -6,6 +6,6 @@
 //   (Script Property CAMP_INTERNAL_TOKEN_SECRET이 설정된 경우에만 저장 활성화).
 //   비밀번호·토큰 비밀키는 절대 이 파일에 넣지 마세요. Script Property(CAMP_INTERNAL_USER / CAMP_INTERNAL_PW_HASH / CAMP_INTERNAL_TOKEN_SECRET)에만 둡니다.
 window.CAMP_CONFIG = Object.freeze({
-  apiUrl: "",
-  internalApiUrl: ""
+  apiUrl: "https://script.google.com/macros/s/AKfycbwPu5LrMwK5_9aDOIOkurya-dbFC9Iu4HEJrCHARyF51rFtzrI0TIG2QKWW3vAhAbY/exec?view=public",
+  internalApiUrl: "https://script.google.com/macros/s/AKfycbwPu5LrMwK5_9aDOIOkurya-dbFC9Iu4HEJrCHARyF51rFtzrI0TIG2QKWW3vAhAbY/exec"
 });
