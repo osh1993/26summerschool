@@ -87,6 +87,26 @@ var CAMP = Object.freeze({
   })
 });
 
+// 웹 관리자(Phase A)에서 편집을 허용하는 Settings 키 화이트리스트.
+// 커서/상태/식별키(LAST_SYNC_ROW_*·PUBLISH_STATUS·LAST_PUBLISH_ID·ROSTER_*·EVENT_ID)는 여기서 제외해 웹 편집을 차단한다.
+// 순수 검증 로직 CampCore.validateSettingsInput 내부의 동일 목록과 반드시 함께 유지한다(둘 다 화이트리스트).
+var EDITABLE_SETTINGS_KEYS = Object.freeze([
+  'EVENT_NAME',
+  'EVENT_START_DATE',
+  'EVENT_END_DATE',
+  'GROUP_COUNT',
+  'ROOM_COUNT',
+  'ATTENDANCE_SOURCE_HEADER',
+  'RAW_STUDENT_SHEET',
+  'RAW_STAFF_SHEET'
+]);
+
+// [Script Property] CAMP_INTERNAL_TOKEN_SECRET
+//   웹 관리자 쓰기 토큰(issueAuthToken/verifyAuthToken)의 HMAC-SHA256 서명 비밀키.
+//   - Apps Script 편집기 > 프로젝트 설정 > 스크립트 속성에 임의의 긴 무작위 문자열로 설정한다.
+//   - 이 저장소나 코드에는 절대 값을 하드코딩하지 않는다(여기에는 이름만 문서화).
+//   - 미설정 시 verifyAuthToken이 bad_signature로 거부하므로 쓰기가 안전 기본값(비활성)으로 잠긴다.
+
 function campSpreadsheet_() {
   var spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
   if (!spreadsheet) throw new Error('바운드 Google Spreadsheet에서 실행해야 합니다.');

@@ -682,4 +682,152 @@ const recFull = Core.reconcileAttendance([], 'p2', fullIds, allIds);
 assert.strictEqual(recFull.toSetPresent.length, 7);
 assert.strictEqual(recFull.toSetAbsent.length, 0);
 
+// ── 만료 토큰(issueAuthToken/verifyAuthToken, HMAC 주입) ─────────────────
+function hmacHex(secret, message) {
+  return crypto.createHmac('sha256', String(secret)).update(String(message)).digest('hex');
+}
+const TOKEN_SECRET = 'super-long-random-secret-for-tests';
+const T0 = 1_800_000_000_000; // 임의 기준 시각(ms)
+const TTL = 60 * 60 * 1000;   // 1시간
+
+// 왕복 성공: 발급 → 만료 전 검증 → ok/user 일치
+const goodToken = Core.issueAuthToken('camp', T0, TTL, TOKEN_SECRET, hmacHex);
+const verified = Core.verifyAuthToken(goodToken, T0 + 1000, TOKEN_SECRET, hmacHex);
+assert.deepStrictEqual(verified, { ok: true, user: 'camp', reason: 'ok' });
+// 한글/비ASCII user도 base64url 왕복
+const hangulToken = Core.issueAuthToken('관리자', T0, TTL, TOKEN_SECRET, hmacHex);
+assert.strictEqual(Core.verifyAuthToken(hangulToken, T0 + 1, TOKEN_SECRET, hmacHex).user, '관리자');
+
+// 만료: nowMs > exp → reason 'expired'
+const expired = Core.verifyAuthToken(goodToken, T0 + TTL + 1, TOKEN_SECRET, hmacHex);
+assert.strictEqual(expired.ok, false);
+assert.strictEqual(expired.reason, 'expired');
+// 경계: nowMs === exp 는 만료로 간주(exp > now 필요)
+assert.strictEqual(Core.verifyAuthToken(goodToken, T0 + TTL, TOKEN_SECRET, hmacHex).reason, 'expired');
+
+// 서명 변조: 마지막 문자만 바꿔도 bad_signature
+const tamperedSig = goodToken.slice(0, -1) + (goodToken.slice(-1) === 'a' ? 'b' : 'a');
+const badSig = Core.verifyAuthToken(tamperedSig, T0 + 1000, TOKEN_SECRET, hmacHex);
+assert.strictEqual(badSig.ok, false);
+assert.strictEqual(badSig.reason, 'bad_signature');
+
+// payload 변조: base64url payload를 다른 값으로 교체하면 서명 불일치
+const forgedPayload = Buffer.from('intruder|' + (T0 + TTL), 'utf8').toString('base64url');
+const forgedToken = forgedPayload + '.' + goodToken.split('.')[1];
+const forged = Core.verifyAuthToken(forgedToken, T0 + 1000, TOKEN_SECRET, hmacHex);
+assert.strictEqual(forged.ok, false);
+assert.strictEqual(forged.reason, 'bad_signature');
+
+// 형식 오류: 점 없음/빈 조각 → malformed
+assert.strictEqual(Core.verifyAuthToken('no-dot-token', T0, TOKEN_SECRET, hmacHex).reason, 'malformed');
+assert.strictEqual(Core.verifyAuthToken('.sig', T0, TOKEN_SECRET, hmacHex).reason, 'malformed');
+assert.strictEqual(Core.verifyAuthToken('payload.', T0, TOKEN_SECRET, hmacHex).reason, 'malformed');
+
+// 비밀키 빈값: ok:false, reason 'bad_signature'(쓰기 안전 기본값 잠금)
+assert.deepStrictEqual(Core.verifyAuthToken(goodToken, T0 + 1000, '', hmacHex), { ok: false, user: null, reason: 'bad_signature' });
+// 다른 비밀키로 검증 → bad_signature
+assert.strictEqual(Core.verifyAuthToken(goodToken, T0 + 1000, 'other-secret', hmacHex).reason, 'bad_signature');
+// hex 대소문자 무관(주입 함수가 대문자 hex를 반환해도 통과)
+function hmacHexUpper(secret, message) { return hmacHex(secret, message).toUpperCase(); }
+assert.strictEqual(Core.verifyAuthToken(
+  Core.issueAuthToken('camp', T0, TTL, TOKEN_SECRET, hmacHexUpper), T0 + 1, TOKEN_SECRET, hmacHex
+).ok, true);
+
+// ── 입력 검증: validateSettingsInput ─────────────────────────────────────
+const settingsOk = Core.validateSettingsInput({
+  EVENT_NAME: '2026 여름수련회', EVENT_START_DATE: '2026-07-23', EVENT_END_DATE: '2026-07-25',
+  GROUP_COUNT: '6', ROOM_COUNT: 8, ATTENDANCE_SOURCE_HEADER: '참석 여부'
+});
+assert.strictEqual(settingsOk.ok, true);
+assert.strictEqual(settingsOk.sanitized.GROUP_COUNT, '6');
+assert.strictEqual(settingsOk.sanitized.ROOM_COUNT, '8');
+assert.strictEqual(settingsOk.sanitized.EVENT_START_DATE, '2026-07-23');
+// 빈 날짜는 '미정'으로 허용
+assert.strictEqual(Core.validateSettingsInput({ EVENT_START_DATE: '' }).sanitized.EVENT_START_DATE, '');
+// 허용 외 키 거부(커서/상태키 편집 차단)
+const settingsForbidden = Core.validateSettingsInput({ LAST_PUBLISH_ID: 'x', LAST_SYNC_ROW_STUDENTS: '99', EVENT_ID: 'hack' });
+assert.strictEqual(settingsForbidden.ok, false);
+assert.strictEqual(ruleCodes(settingsForbidden.issues).filter((c) => c === 'SETTINGS_KEY_NOT_EDITABLE').length, 3);
+assert.deepStrictEqual(settingsForbidden.sanitized, {});
+// 잘못된 날짜 형식/비존재 날짜 거부
+assert.ok(ruleCodes(Core.validateSettingsInput({ EVENT_START_DATE: '2026/07/23' }).issues).includes('SETTINGS_DATE_INVALID'));
+assert.ok(ruleCodes(Core.validateSettingsInput({ EVENT_END_DATE: '2026-13-40' }).issues).includes('SETTINGS_DATE_INVALID'));
+// 개수: 0/음수/비정수/상한초과 거부
+['0', '-1', '2.5', '51'].forEach((v) => assert.ok(ruleCodes(Core.validateSettingsInput({ GROUP_COUNT: v }).issues).includes('SETTINGS_COUNT_INVALID'), 'GROUP_COUNT=' + v));
+
+// ── 입력 검증: validateFieldMapInput ─────────────────────────────────────
+const fieldMapOk = Core.validateFieldMapInput([
+  { source_sheet: 'Form_Raw_Students', source_header: '이름', normalized_field: 'legal_name', required: true, active: true },
+  { source_sheet: 'Roster_Import', source_header: '연락처', normalized_field: 'phone', required: false, active: 'yes' }
+]);
+assert.strictEqual(fieldMapOk.ok, true);
+assert.strictEqual(fieldMapOk.sanitized.length, 2);
+assert.strictEqual(fieldMapOk.sanitized[0].required, true);
+assert.strictEqual(fieldMapOk.sanitized[1].active, true);
+// source_header 빈값 → 경고(비차단)
+const fieldMapWarn = Core.validateFieldMapInput([{ source_sheet: 'Form_Raw_Staff', source_header: '', normalized_field: 'campus' }]);
+assert.strictEqual(fieldMapWarn.ok, true);
+assert.ok(ruleCodes(fieldMapWarn.issues).includes('FIELD_MAP_HEADER_BLANK'));
+// 허용 외 source_sheet 거부
+assert.ok(ruleCodes(Core.validateFieldMapInput([{ source_sheet: 'Random_Sheet', normalized_field: 'campus' }]).issues).includes('FIELD_MAP_SOURCE_INVALID'));
+// 어휘 밖 normalized_field 거부
+const fieldMapBadField = Core.validateFieldMapInput([{ source_sheet: 'Form_Raw_Students', normalized_field: 'nickname' }]);
+assert.strictEqual(fieldMapBadField.ok, false);
+assert.ok(ruleCodes(fieldMapBadField.issues).includes('FIELD_MAP_FIELD_INVALID'));
+
+// ── 입력 검증: validateGroupsInput ───────────────────────────────────────
+const groupsOk = Core.validateGroupsInput([
+  { group_id: 'G01', display_name: '1조', target_size: 8, min_size: 6, max_size: 10, active: true },
+  { display_name: '신규조', active: 'true' } // 신규(id 없음), 크기 미지정 허용
+]);
+assert.strictEqual(groupsOk.ok, true);
+assert.strictEqual(groupsOk.sanitized[0].group_id, 'G01'); // 기존 id 보존
+assert.strictEqual(groupsOk.sanitized[0].target_size, 8);
+assert.strictEqual(groupsOk.sanitized[1].group_id, undefined); // 신규는 id 없음
+// display_name 필수
+assert.ok(ruleCodes(Core.validateGroupsInput([{ group_id: 'G01', display_name: '' }]).issues).includes('GROUP_NAME_REQUIRED'));
+// 음수 크기 거부(차단)
+const groupsNeg = Core.validateGroupsInput([{ display_name: '조', target_size: -1 }]);
+assert.strictEqual(groupsNeg.ok, false);
+assert.ok(ruleCodes(groupsNeg.issues).includes('SIZE_FIELD_INVALID'));
+// min>target>max 순서 위반은 경고(비차단)
+const groupsOrder = Core.validateGroupsInput([{ display_name: '조', target_size: 5, min_size: 8, max_size: 6 }]);
+assert.strictEqual(groupsOrder.ok, true);
+assert.ok(ruleCodes(groupsOrder.issues).includes('GROUP_SIZE_ORDER'));
+
+// ── 입력 검증: validateRoomsInput ────────────────────────────────────────
+const roomsInputOk = Core.validateRoomsInput([
+  { room_id: 'R01', display_name: '101호', capacity: 4, gender_scope: 'MALE', floor: '1', active: true }
+]);
+assert.strictEqual(roomsInputOk.ok, true);
+assert.strictEqual(roomsInputOk.sanitized[0].room_id, 'R01'); // 보존
+assert.strictEqual(roomsInputOk.sanitized[0].gender_scope, 'male'); // 소문자 정규화
+assert.strictEqual(roomsInputOk.sanitized[0].capacity, 4);
+// display_name 필수 / capacity>0 / gender_scope enum
+assert.ok(ruleCodes(Core.validateRoomsInput([{ display_name: '', capacity: 4, gender_scope: 'male' }]).issues).includes('ROOM_NAME_REQUIRED'));
+assert.ok(ruleCodes(Core.validateRoomsInput([{ display_name: '방', capacity: 0, gender_scope: 'male' }]).issues).includes('ROOM_CAPACITY_INVALID'));
+assert.ok(ruleCodes(Core.validateRoomsInput([{ display_name: '방', capacity: -3, gender_scope: 'male' }]).issues).includes('ROOM_CAPACITY_INVALID'));
+const roomsBadScope = Core.validateRoomsInput([{ display_name: '방', capacity: 4, gender_scope: 'coed' }]);
+assert.strictEqual(roomsBadScope.ok, false);
+assert.ok(ruleCodes(roomsBadScope.issues).includes('ROOM_GENDER_SCOPE_INVALID'));
+
+// ── 입력 검증: validateVehiclesInput ─────────────────────────────────────
+const vehiclesOk = Core.validateVehiclesInput([
+  { vehicle_id: 'V01', public_label: '교회 차량 1', capacity_total: 10, accessible: false, active: true },
+  { public_label: '카풀', capacity_total: '4', accessible: 'yes' } // 신규
+]);
+assert.strictEqual(vehiclesOk.ok, true);
+assert.strictEqual(vehiclesOk.sanitized[0].vehicle_id, 'V01'); // 보존
+assert.strictEqual(vehiclesOk.sanitized[1].vehicle_id, undefined); // 신규
+assert.strictEqual(vehiclesOk.sanitized[1].capacity_total, 4);
+assert.strictEqual(vehiclesOk.sanitized[1].accessible, true);
+// public_label 필수(공개표시) / capacity_total ≥ 2
+assert.ok(ruleCodes(Core.validateVehiclesInput([{ public_label: '', capacity_total: 5 }]).issues).includes('VEHICLE_LABEL_REQUIRED'));
+const vehiclesSmall = Core.validateVehiclesInput([{ public_label: '차', capacity_total: 1 }]);
+assert.strictEqual(vehiclesSmall.ok, false);
+assert.ok(ruleCodes(vehiclesSmall.issues).includes('VEHICLE_CAPACITY_INVALID'));
+
+// EDITABLE_SETTINGS_KEYS 화이트리스트에 커서/상태키가 없음을 확인
+['LAST_SYNC_ROW_STUDENTS', 'PUBLISH_STATUS', 'LAST_PUBLISH_ID', 'ROSTER_MAX_ROWS', 'EVENT_ID'].forEach((k) => assert.ok(Core.EDITABLE_SETTINGS_KEYS.indexOf(k) < 0, k + '는 편집 불가여야 함'));
+
 console.log('Core tests passed');

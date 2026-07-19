@@ -3,10 +3,47 @@
 const SUPPORTED_SCHEMAS = ["public-snapshot/v1", "public-snapshot/v2", "public-snapshot/v3", "public-snapshot/v4"];
 const INTERNAL_SCHEMAS = ["internal-snapshot/v1", "internal-snapshot/v2", "internal-snapshot/v3"];
 const INTERNAL_SESSION_KEY = "camp.internal.snapshot";
+// 쓰기 토큰은 스냅샷과 별도로 보관한다(비밀번호는 저장하지 않음).
+const INTERNAL_TOKEN_KEY = "camp.internal.token";
 const FALLBACK_SOURCES = [
   { key: "latest", url: "data/latest.json" },
   { key: "sample", url: "data/sample.json" }
 ];
+
+// 관리자 설정 화면 고정 어휘(Apps Script Core.js의 계약과 일치해야 한다).
+const CONFIG_SETTINGS_KEYS = [
+  "EVENT_NAME", "EVENT_START_DATE", "EVENT_END_DATE",
+  "GROUP_COUNT", "ROOM_COUNT", "ATTENDANCE_SOURCE_HEADER",
+  "RAW_STUDENT_SHEET", "RAW_STAFF_SHEET"
+];
+const FIELD_MAP_SOURCES = ["Form_Raw_Students", "Form_Raw_Staff", "Roster_Import"];
+const NORMALIZED_FIELD_LABELS = {
+  legal_name: "이름 (legal_name)",
+  person_type: "구분 (person_type)",
+  campus: "소속 (campus)",
+  grade_band: "학년 (grade_band)",
+  gender: "성별 (gender)",
+  engagement_score: "적극성 (engagement_score)",
+  extraversion_score: "외향성 (extraversion_score)",
+  newcomer: "새친구 (newcomer)",
+  leader_candidate: "리더 후보 (leader_candidate)",
+  phone: "전화 (phone)",
+  birth_date: "생년월일 (birth_date)",
+  guardian_phone: "보호자 전화 (guardian_phone)",
+  insurance_status: "보험 (insurance_status)",
+  private_note: "비공개 메모 (private_note)",
+  free_text: "자유 서술 (free_text)"
+};
+const GENDER_SCOPE_OPTIONS = [["male", "남 (male)"], ["female", "여 (female)"], ["mixed", "혼성 (mixed)"]];
+// {error} 코드 → 운영자 안내 문구.
+const CONFIG_ERROR_MESSAGES = {
+  writes_disabled: "서버에 토큰 비밀키(CAMP_INTERNAL_TOKEN_SECRET)가 설정되지 않아 저장이 비활성화되었습니다.",
+  unauthorized: "세션이 만료되었거나 인증되지 않았습니다. 내부 명단 탭에서 다시 로그인하세요.",
+  token_expired: "로그인 세션이 만료되었습니다. 내부 명단 탭에서 다시 로그인하세요.",
+  invalid_input: "입력값을 확인해 주세요.",
+  not_found: "알 수 없는 요청입니다.",
+  temporarily_unavailable: "일시적으로 처리할 수 없습니다. 잠시 뒤 다시 시도해 주세요."
+};
 
 const state = {
   snapshot: null,
@@ -26,6 +63,11 @@ const state = {
   internal: {
     snapshot: null,
     source: null
+  },
+  config: {
+    token: null,
+    loaded: false,
+    loading: false
   }
 };
 
@@ -87,6 +129,7 @@ async function init() {
   bindTabs();
   bindFilters();
   bindInternal();
+  bindConfig();
 
   try {
     const loaded = await loadSnapshot();
@@ -134,6 +177,9 @@ function activateTab(name) {
   document.querySelectorAll("[role='tabpanel']").forEach((panel) => {
     panel.hidden = panel.id !== `panel-${name}`;
   });
+
+  // 설정 탭이 활성화될 때마다 로그인/토큰/샘플 상태를 다시 판단해 렌더한다.
+  if (name === "config") renderConfig();
 }
 
 function bindFilters() {
@@ -769,6 +815,9 @@ function restoreInternal() {
     if (snapshot && INTERNAL_SCHEMAS.includes(snapshot.schema_version)) {
       state.internal.snapshot = snapshot;
       state.internal.source = "session";
+      // 쓰기 토큰도 함께 복원한다(있을 때만).
+      const token = sessionStorage.getItem(INTERNAL_TOKEN_KEY);
+      if (token) state.config.token = token;
       showInternalView(true);
       renderInternal();
     }
@@ -810,7 +859,14 @@ async function submitInternal(event) {
     }
 
     state.internal.snapshot = snapshot;
+    // 쓰기 토큰이 함께 오면 별도 키에 보관한다(설정 탭 저장 인증용). 비밀번호는 저장하지 않는다.
+    state.config.token = (snapshot.token && typeof snapshot.token === "string") ? snapshot.token : null;
+    state.config.loaded = false;
     try { sessionStorage.setItem(INTERNAL_SESSION_KEY, JSON.stringify(snapshot)); } catch (storeError) { /* 저장 실패는 화면 표시에 영향 없음 */ }
+    try {
+      if (state.config.token) sessionStorage.setItem(INTERNAL_TOKEN_KEY, state.config.token);
+      else sessionStorage.removeItem(INTERNAL_TOKEN_KEY);
+    } catch (tokenStoreError) { /* 저장 실패는 화면 표시에 영향 없음 */ }
     showInternalView(true);
     renderInternal();
   } catch (error) {
@@ -837,8 +893,12 @@ async function postInternal(apiUrl, user, password) {
 
 function logoutInternal() {
   sessionStorage.removeItem(INTERNAL_SESSION_KEY);
+  sessionStorage.removeItem(INTERNAL_TOKEN_KEY);
   state.internal.snapshot = null;
   state.internal.source = null;
+  state.config.token = null;
+  state.config.loaded = false;
+  renderConfig();
   clearNode(document.getElementById("internal-table-body"));
   clearNode(document.getElementById("internal-room-body"));
   clearNode(document.getElementById("internal-trip-body"));
@@ -1019,4 +1079,381 @@ function renderDirectory(bodyId, people, groups) {
     appendTextElement(row, "td", person.group_id ? (groupNames[person.group_id] || person.group_id) : "미배정");
     body.append(row);
   });
+}
+
+/* ── 관리자 설정 탭(Phase A-3) ─────────────────────────────────
+   로그인으로 받은 쓰기 토큰으로 Apps Script(doPost)에 {action, token, payload}를 보내
+   설정·매핑·조·방·차량을 편집한다. 비밀번호는 저장하지 않고, 토큰만 sessionStorage에 임시 보관한다. */
+function bindConfig() {
+  const form = document.getElementById("config-settings-form");
+  if (form) form.addEventListener("submit", onSaveSettings);
+  bindConfigClick("config-reload", () => { state.config.loaded = false; loadConfig(); });
+  bindConfigClick("config-ensure-groups", () => runEnsure("ensure_group_count", "config-settings-msg", "조 개수를 Settings 기준으로 맞췄습니다."));
+  bindConfigClick("config-ensure-rooms", () => runEnsure("ensure_room_count", "config-settings-msg", "방 개수를 Settings 기준으로 맞췄습니다."));
+  bindConfigClick("config-fieldmap-add", () => addConfigRow("config-fieldmap-body", fieldMapRowNode));
+  bindConfigClick("config-fieldmap-save", () => saveConfig("save_field_map", collectConfigRows("config-fieldmap-body"), "config-fieldmap-msg", "필드 매핑을 저장했습니다."));
+  bindConfigClick("config-groups-add", () => addConfigRow("config-groups-body", groupRowNode));
+  bindConfigClick("config-groups-save", () => saveConfig("save_groups", collectConfigRows("config-groups-body"), "config-groups-msg", "조 정보를 저장했습니다."));
+  bindConfigClick("config-rooms-add", () => addConfigRow("config-rooms-body", roomRowNode));
+  bindConfigClick("config-rooms-save", () => saveConfig("save_rooms", collectConfigRows("config-rooms-body"), "config-rooms-msg", "방 정보를 저장했습니다."));
+  bindConfigClick("config-vehicles-add", () => addConfigRow("config-vehicles-body", vehicleRowNode));
+  bindConfigClick("config-vehicles-save", () => saveConfig("save_vehicles", collectConfigRows("config-vehicles-body"), "config-vehicles-msg", "차량 정보를 저장했습니다."));
+}
+
+function bindConfigClick(id, fn) {
+  const el = document.getElementById(id);
+  if (el) el.addEventListener("click", fn);
+}
+
+function onSaveSettings(event) {
+  event.preventDefault();
+  if (state.config.disabled) return;
+  const payload = {};
+  CONFIG_SETTINGS_KEYS.forEach((key) => {
+    const input = document.querySelector(`#config-settings-form [data-setting="${key}"]`);
+    payload[key] = input ? input.value : "";
+  });
+  saveConfig("save_settings", payload, "config-settings-msg", "설정을 저장했습니다.");
+}
+
+// 로그인/토큰/샘플 상태에 따라 안내(gate)만 보일지, 편집 본문(body)을 보일지 결정한다.
+function renderConfig() {
+  const gate = document.getElementById("config-gate");
+  const gateText = document.getElementById("config-gate-text");
+  const body = document.getElementById("config-body");
+  const reload = document.getElementById("config-reload");
+  const modeNote = document.getElementById("config-mode-note");
+  if (!gate || !body) return;
+
+  const loggedIn = !!state.internal.snapshot;
+  const apiUrl = String(window.CAMP_CONFIG?.internalApiUrl || "").trim();
+  const hasToken = !!state.config.token;
+  reload.hidden = true;
+  modeNote.hidden = true;
+
+  if (!loggedIn) {
+    body.hidden = true;
+    gate.hidden = false;
+    gate.dataset.tone = "info";
+    gateText.textContent = "내부 명단 탭에서 먼저 로그인하세요. 로그인하면 이 화면에서 설정을 편집할 수 있습니다.";
+    return;
+  }
+
+  if (!apiUrl) {
+    // 샘플(데모) 모드: 백엔드가 없어 저장할 수 없다. 폼은 비활성 상태로만 보여준다.
+    gate.hidden = true;
+    body.hidden = false;
+    modeNote.hidden = false;
+    modeNote.textContent = "샘플(데모) 모드입니다. 실제 백엔드(config.js의 internalApiUrl)를 연결해야 설정을 저장할 수 있습니다.";
+    applyConfigData(emptyConfigData(), true);
+    return;
+  }
+
+  if (!hasToken) {
+    body.hidden = true;
+    gate.hidden = false;
+    gate.dataset.tone = "warn";
+    gateText.textContent = "서버에 토큰 비밀키(CAMP_INTERNAL_TOKEN_SECRET)가 설정되지 않아 설정 편집이 비활성화되었습니다. 관리자에게 문의하세요.";
+    return;
+  }
+
+  gate.hidden = true;
+  body.hidden = false;
+  reload.hidden = false;
+  if (!state.config.loaded && !state.config.loading) loadConfig();
+}
+
+async function loadConfig() {
+  const apiUrl = String(window.CAMP_CONFIG?.internalApiUrl || "").trim();
+  if (!apiUrl || !state.config.token) return;
+  state.config.loading = true;
+  try {
+    const data = await postConfigAction("get_config", null);
+    if (data && data.error) {
+      if (handleConfigSessionError(data.error)) return;
+      applyConfigData(emptyConfigData(), true);
+      return;
+    }
+    state.config.loaded = true;
+    applyConfigData(data, false);
+  } catch (error) {
+    applyConfigData(emptyConfigData(), true);
+  } finally {
+    state.config.loading = false;
+  }
+}
+
+// 세션 만료/미인증이면 토큰을 비우고 안내 gate를 띄운다. 처리했으면 true.
+function handleConfigSessionError(code) {
+  if (code !== "token_expired" && code !== "unauthorized") return false;
+  state.config.token = null;
+  state.config.loaded = false;
+  try { sessionStorage.removeItem(INTERNAL_TOKEN_KEY); } catch (error) { /* noop */ }
+  const gate = document.getElementById("config-gate");
+  const gateText = document.getElementById("config-gate-text");
+  document.getElementById("config-body").hidden = true;
+  document.getElementById("config-reload").hidden = true;
+  gate.hidden = false;
+  gate.dataset.tone = "warn";
+  gateText.textContent = CONFIG_ERROR_MESSAGES[code];
+  return true;
+}
+
+async function postConfigAction(action, payload) {
+  const apiUrl = String(window.CAMP_CONFIG?.internalApiUrl || "").trim();
+  if (!apiUrl) throw new Error("internalApiUrl 미설정");
+  // text/plain으로 보내 CORS preflight를 피한다(내부 뷰 로그인과 동일 패턴).
+  const response = await fetch(apiUrl, {
+    method: "POST",
+    redirect: "follow",
+    headers: { "Content-Type": "text/plain;charset=utf-8" },
+    body: JSON.stringify({ action, token: state.config.token, payload })
+  });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}
+
+async function saveConfig(action, payload, msgId, okText) {
+  if (state.config.disabled) return;
+  clearConfigMsg(msgId);
+  try {
+    const data = await postConfigAction(action, payload);
+    if (data && data.error) {
+      if (handleConfigSessionError(data.error)) return;
+      showConfigMsg(msgId, CONFIG_ERROR_MESSAGES[data.error] || "저장하지 못했습니다.", "error", data.issues);
+      return;
+    }
+    // 성공: 서버가 부여한 새 id·상태를 반영하기 위해 재로딩한 뒤 안내한다.
+    const warnings = Array.isArray(data.warnings) ? data.warnings : [];
+    await loadConfig();
+    showConfigMsg(msgId, okText + (warnings.length ? ` (경고 ${warnings.length}건)` : ""), warnings.length ? "warn" : "info", warnings);
+  } catch (error) {
+    showConfigMsg(msgId, CONFIG_ERROR_MESSAGES.temporarily_unavailable, "error");
+  }
+}
+
+async function runEnsure(action, msgId, okText) {
+  if (state.config.disabled) return;
+  clearConfigMsg(msgId);
+  try {
+    const data = await postConfigAction(action, null);
+    if (data && data.error) {
+      if (handleConfigSessionError(data.error)) return;
+      showConfigMsg(msgId, CONFIG_ERROR_MESSAGES[data.error] || "실행하지 못했습니다.", "error");
+      return;
+    }
+    await loadConfig();
+    showConfigMsg(msgId, okText, "info");
+  } catch (error) {
+    showConfigMsg(msgId, CONFIG_ERROR_MESSAGES.temporarily_unavailable, "error");
+  }
+}
+
+function applyConfigData(data, disabled) {
+  state.config.disabled = disabled;
+  data = data || {};
+  CONFIG_SETTINGS_KEYS.forEach((key) => {
+    const input = document.querySelector(`#config-settings-form [data-setting="${key}"]`);
+    if (!input) return;
+    input.value = (data.settings && data.settings[key] != null) ? String(data.settings[key]) : "";
+    input.disabled = disabled;
+  });
+
+  const datalist = document.getElementById("config-form-headers");
+  clearNode(datalist);
+  const headers = data.form_headers || {};
+  [...new Set([...(headers.students || []), ...(headers.staff || [])])].forEach((header) => {
+    const option = document.createElement("option");
+    option.value = String(header);
+    datalist.append(option);
+  });
+
+  renderConfigTable("config-fieldmap-body", data.field_map, fieldMapRowNode, disabled);
+  renderConfigTable("config-groups-body", data.groups, groupRowNode, disabled);
+  renderConfigTable("config-rooms-body", data.rooms, roomRowNode, disabled);
+  renderConfigTable("config-vehicles-body", data.vehicles, vehicleRowNode, disabled);
+  setConfigButtonsDisabled(disabled);
+}
+
+function setConfigButtonsDisabled(disabled) {
+  [
+    "config-settings-save", "config-ensure-groups", "config-ensure-rooms",
+    "config-fieldmap-add", "config-fieldmap-save",
+    "config-groups-add", "config-groups-save",
+    "config-rooms-add", "config-rooms-save",
+    "config-vehicles-add", "config-vehicles-save"
+  ].forEach((id) => { const button = document.getElementById(id); if (button) button.disabled = disabled; });
+}
+
+function emptyConfigData() {
+  return { settings: {}, field_map: [], groups: [], rooms: [], vehicles: [], lookups: [], form_headers: { students: [], staff: [] } };
+}
+
+function renderConfigTable(bodyId, rows, builder, disabled) {
+  const body = document.getElementById(bodyId);
+  if (!body) return;
+  clearNode(body);
+  (Array.isArray(rows) ? rows : []).forEach((row) => body.append(builder(row, disabled)));
+}
+
+function addConfigRow(bodyId, builder) {
+  if (state.config.disabled) return;
+  document.getElementById(bodyId).append(builder({ active: true }, false));
+}
+
+function collectConfigRows(bodyId) {
+  return Array.from(document.getElementById(bodyId).querySelectorAll("tr")).map((tr) => {
+    const object = {};
+    tr.querySelectorAll("[data-field]").forEach((element) => {
+      object[element.dataset.field] = element.type === "checkbox" ? element.checked : element.value;
+    });
+    return object;
+  });
+}
+
+// ── 편집 셀 빌더(값은 textContent/value로만 주입, innerHTML 미사용) ──
+function cfgInput(type, value, field, opts) {
+  opts = opts || {};
+  const input = document.createElement("input");
+  input.type = type;
+  input.dataset.field = field;
+  if (type === "checkbox") input.checked = !!value;
+  else input.value = value == null ? "" : String(value);
+  if (opts.readOnly) input.readOnly = true;
+  if (opts.disabled) input.disabled = true;
+  if (opts.list) input.setAttribute("list", opts.list);
+  if (opts.min != null) input.min = String(opts.min);
+  if (opts.max != null) input.max = String(opts.max);
+  if (opts.placeholder) input.placeholder = opts.placeholder;
+  input.setAttribute("aria-label", opts.ariaLabel || field);
+  return input;
+}
+
+function cfgSelect(options, value, field, opts) {
+  opts = opts || {};
+  const select = document.createElement("select");
+  select.dataset.field = field;
+  options.forEach(([optionValue, label]) => {
+    const option = document.createElement("option");
+    option.value = optionValue;
+    option.textContent = label;
+    if (String(optionValue) === String(value == null ? "" : value)) option.selected = true;
+    select.append(option);
+  });
+  if (opts.disabled) select.disabled = true;
+  select.setAttribute("aria-label", opts.ariaLabel || field);
+  return select;
+}
+
+function cfgCell(node) {
+  const td = document.createElement("td");
+  if (node) td.append(node);
+  return td;
+}
+
+// 상태 칩: 신규(id 없음) / 배정 있음(비활성 불가) / 기존.
+function cfgStatusCell(idValue, hasAssignments) {
+  const td = document.createElement("td");
+  const chip = element("span", "config-status-chip");
+  if (!idValue) { chip.dataset.kind = "new"; chip.textContent = "신규"; }
+  else if (hasAssignments) { chip.dataset.kind = "locked"; chip.textContent = "배정 있음"; }
+  else { chip.dataset.kind = "active"; chip.textContent = "기존"; }
+  td.append(chip);
+  return td;
+}
+
+function cfgRemoveCell(disabled) {
+  const td = document.createElement("td");
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "config-row-remove";
+  button.textContent = "삭제";
+  button.setAttribute("aria-label", "이 매핑 행 삭제");
+  if (disabled) button.disabled = true;
+  button.addEventListener("click", () => { const tr = button.closest("tr"); if (tr) tr.remove(); });
+  td.append(button);
+  return td;
+}
+
+function fieldMapRowNode(row, disabled) {
+  row = row || {};
+  const tr = document.createElement("tr");
+  tr.append(cfgCell(cfgSelect(FIELD_MAP_SOURCES.map((source) => [source, source]), row.source_sheet || FIELD_MAP_SOURCES[0], "source_sheet", { disabled, ariaLabel: "원본 시트" })));
+  tr.append(cfgCell(cfgInput("text", row.source_header, "source_header", { disabled, list: "config-form-headers", placeholder: "질문 헤더", ariaLabel: "원본 헤더" })));
+  tr.append(cfgCell(cfgSelect(Object.keys(NORMALIZED_FIELD_LABELS).map((key) => [key, NORMALIZED_FIELD_LABELS[key]]), row.normalized_field || "legal_name", "normalized_field", { disabled, ariaLabel: "정규 필드" })));
+  tr.append(cfgCell(cfgInput("checkbox", row.required, "required", { disabled, ariaLabel: "필수 여부" })));
+  tr.append(cfgCell(cfgInput("checkbox", row.active == null ? true : row.active, "active", { disabled, ariaLabel: "활성 여부" })));
+  tr.append(cfgRemoveCell(disabled));
+  return tr;
+}
+
+function groupRowNode(row, disabled) {
+  row = row || {};
+  const tr = document.createElement("tr");
+  const id = row.group_id || "";
+  const activeDisabled = disabled || !!row.has_assignments;
+  tr.append(cfgCell(cfgInput("text", id, "group_id", { readOnly: true, placeholder: "(신규)", ariaLabel: "조 ID" })));
+  tr.append(cfgCell(cfgInput("text", row.display_name, "display_name", { disabled, placeholder: "예: 1조", ariaLabel: "조 이름" })));
+  tr.append(cfgCell(cfgInput("text", row.color, "color", { disabled, placeholder: "#2563EB", ariaLabel: "색" })));
+  tr.append(cfgCell(cfgInput("number", row.target_size, "target_size", { disabled, min: 0, ariaLabel: "목표 인원" })));
+  tr.append(cfgCell(cfgInput("number", row.min_size, "min_size", { disabled, min: 0, ariaLabel: "최소 인원" })));
+  tr.append(cfgCell(cfgInput("number", row.max_size, "max_size", { disabled, min: 0, ariaLabel: "최대 인원" })));
+  tr.append(cfgCell(cfgInput("checkbox", row.active == null ? true : row.active, "active", { disabled: activeDisabled, ariaLabel: "활성 여부" })));
+  tr.append(cfgStatusCell(id, row.has_assignments));
+  return tr;
+}
+
+function roomRowNode(row, disabled) {
+  row = row || {};
+  const tr = document.createElement("tr");
+  const id = row.room_id || "";
+  const activeDisabled = disabled || !!row.has_assignments;
+  tr.append(cfgCell(cfgInput("text", id, "room_id", { readOnly: true, placeholder: "(신규)", ariaLabel: "방 ID" })));
+  tr.append(cfgCell(cfgInput("text", row.display_name, "display_name", { disabled, placeholder: "예: 101호", ariaLabel: "방 이름" })));
+  tr.append(cfgCell(cfgInput("number", row.capacity, "capacity", { disabled, min: 1, ariaLabel: "정원" })));
+  tr.append(cfgCell(cfgSelect(GENDER_SCOPE_OPTIONS, row.gender_scope || "mixed", "gender_scope", { disabled, ariaLabel: "성별 범위" })));
+  tr.append(cfgCell(cfgInput("text", row.floor, "floor", { disabled, placeholder: "예: 1", ariaLabel: "층" })));
+  tr.append(cfgCell(cfgInput("checkbox", row.active == null ? true : row.active, "active", { disabled: activeDisabled, ariaLabel: "활성 여부" })));
+  tr.append(cfgStatusCell(id, row.has_assignments));
+  return tr;
+}
+
+function vehicleRowNode(row, disabled) {
+  row = row || {};
+  const tr = document.createElement("tr");
+  const id = row.vehicle_id || "";
+  const activeDisabled = disabled || !!row.has_assignments;
+  tr.append(cfgCell(cfgInput("text", id, "vehicle_id", { readOnly: true, placeholder: "(신규)", ariaLabel: "차량 ID" })));
+  tr.append(cfgCell(cfgInput("text", row.public_label, "public_label", { disabled, placeholder: "예: 1호차", ariaLabel: "공개 표시명" })));
+  tr.append(cfgCell(cfgInput("number", row.capacity_total, "capacity_total", { disabled, min: 2, ariaLabel: "전체 정원(운전자 포함)" })));
+  tr.append(cfgCell(cfgInput("checkbox", row.accessible, "accessible", { disabled, ariaLabel: "휠체어 접근 가능" })));
+  tr.append(cfgCell(cfgInput("checkbox", row.active == null ? true : row.active, "active", { disabled: activeDisabled, ariaLabel: "활성 여부" })));
+  tr.append(cfgStatusCell(id, row.has_assignments));
+  return tr;
+}
+
+function clearConfigMsg(msgId) {
+  const node = document.getElementById(msgId);
+  if (!node) return;
+  clearNode(node);
+  node.hidden = true;
+}
+
+function showConfigMsg(msgId, text, tone, issues) {
+  const node = document.getElementById(msgId);
+  if (!node) return;
+  clearNode(node);
+  node.dataset.tone = tone || "info";
+  node.hidden = false;
+  appendTextElement(node, "span", text);
+  if (Array.isArray(issues) && issues.length) {
+    const list = element("ul", "config-issue-list");
+    issues.forEach((item) => appendTextElement(list, "li", configIssueText(item)));
+    node.append(list);
+  }
+}
+
+function configIssueText(issue) {
+  const ref = (issue.ref != null && issue.ref !== "") ? ` [${issue.ref}]` : "";
+  return `${issue.message || issue.code || "확인 필요"}${ref}`;
 }

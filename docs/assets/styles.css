@@ -201,7 +201,7 @@ h1 {
 
 .tab-list {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   gap: 8px;
   margin-bottom: 10px;
   padding: 5px;
@@ -1026,6 +1026,183 @@ summary:focus-visible {
   text-align: center;
 }
 
+/* ── 관리자 설정 탭 ── */
+.config-gate {
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--blue-pale);
+  color: var(--blue-dark);
+  font-weight: 700;
+}
+
+.config-gate[data-tone="warn"] {
+  background: #fdf3d6;
+  color: #7a5a00;
+  border-color: #f0d999;
+}
+
+.config-mode-note {
+  margin: 0 0 16px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: #fdf3d6;
+  color: #7a5a00;
+  font-weight: 700;
+}
+
+.config-block {
+  margin-bottom: 26px;
+  padding-bottom: 6px;
+}
+
+.config-hint {
+  margin: 0 0 10px;
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+
+.config-settings {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  max-width: none;
+}
+
+.config-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.config-save,
+.config-secondary,
+.config-reload,
+.config-row-remove {
+  min-height: 44px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 10px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.config-save {
+  background: var(--blue);
+  color: #fff;
+}
+
+.config-secondary,
+.config-reload {
+  background: #e9eef3;
+  color: var(--navy-soft);
+}
+
+.config-reload {
+  min-height: 40px;
+}
+
+.config-row-remove {
+  min-height: 36px;
+  padding: 0 10px;
+  background: var(--red-pale);
+  color: var(--red);
+}
+
+.config-save[disabled],
+.config-secondary[disabled],
+.config-row-remove[disabled] {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.config-table input,
+.config-table select {
+  min-height: 40px;
+  min-width: 84px;
+  padding: 6px 8px;
+  border: 1px solid #afbdc9;
+  border-radius: 8px;
+  background: #fff;
+  color: var(--ink);
+  font-size: 0.86rem;
+}
+
+.config-table input[type="checkbox"] {
+  min-width: 22px;
+  width: 22px;
+  height: 22px;
+}
+
+.config-table input[readonly] {
+  background: #eef2f6;
+  color: var(--muted);
+  min-width: 70px;
+}
+
+.config-table input[type="number"] {
+  min-width: 68px;
+  width: 72px;
+}
+
+.config-status-chip {
+  display: inline-block;
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.config-status-chip[data-kind="locked"] {
+  background: #fdf3d6;
+  color: #7a5a00;
+}
+
+.config-status-chip[data-kind="new"] {
+  background: var(--blue-pale);
+  color: var(--blue-dark);
+}
+
+.config-status-chip[data-kind="active"] {
+  background: #dff3e4;
+  color: #1c6b39;
+}
+
+.config-status-chip[data-kind="inactive"] {
+  background: #eef2f6;
+  color: var(--muted);
+}
+
+.config-msg {
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  font-weight: 700;
+}
+
+.config-msg[data-tone="error"] {
+  background: var(--red-pale);
+  color: var(--red);
+}
+
+.config-msg[data-tone="info"] {
+  background: var(--blue-pale);
+  color: var(--blue-dark);
+}
+
+.config-msg[data-tone="warn"] {
+  background: #fdf3d6;
+  color: #7a5a00;
+}
+
+.config-issue-list {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  font-weight: 600;
+}
+
 [hidden] {
   display: none !important;
 }
@@ -1045,6 +1222,11 @@ summary:focus-visible {
     padding: 15px;
   }
 
+  /* 5개 탭은 360px 폭에서 한 줄에 다 담기 어려우므로 3열로 감싸 2줄로 배치한다. */
+  .tab-list {
+    grid-template-columns: repeat(3, 1fr);
+  }
+
   .tab-button {
     padding: 0 4px;
     font-size: 0.82rem;
@@ -1052,6 +1234,10 @@ summary:focus-visible {
 
   .filters,
   .group-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .config-settings {
     grid-template-columns: 1fr;
   }
 
