@@ -7,6 +7,7 @@ function onOpen() {
     .addItem('2. Form 응답 증분 동기화', 'syncFormResponsesIncremental')
     .addItem('2-1. 명단 파일 가져오기(미리보기)', 'importRosterPreview')
     .addItem('2-2. 명단 가져오기 반영', 'importRosterCommit')
+    .addItem('2-3. 참석 세션 반영(참석 여부→Attendance)', 'applyAttendanceFromForm')
     .addItem('3. 조편성 제안', 'proposeGroupAssignments')
     .addItem('3-1. 조 개수 맞추기(Settings 기준)', 'ensureGroupCountFromSettings')
     .addItem('3-2. 표준 세션(7슬롯) 시드', 'seedStandardTimeSlots')
