@@ -68,8 +68,25 @@ const state = {
     token: null,
     loaded: false,
     loading: false
+  },
+  // 참석자 관리(Phase B): PII 포함 목록. 서버(get_participants)에서만 채워지고 정적 저장하지 않는다.
+  participants: {
+    list: [],
+    private: {},
+    query: "",
+    disabled: true
   }
 };
+
+// 참석자 편집 폼 enum 옵션(Core.js validateParticipantInput 계약과 일치해야 한다).
+const PARTICIPANT_PERSON_TYPE_OPTIONS = [["student", "학생"], ["teacher", "교사"], ["staff", "스탭"]];
+const PARTICIPANT_CAMPUS_OPTIONS = [["", "(미지정)"], ["imd", "임동"], ["suwan", "수완"], ["other", "기타"]];
+const PARTICIPANT_GRADE_OPTIONS = [["", "(미지정)"], ["middle_1", "중1"], ["middle_2", "중2"], ["middle_3", "중3"], ["high_1", "고1"], ["high_2", "고2"], ["high_3", "고3"], ["adult", "성인"], ["unknown", "미상"]];
+const PARTICIPANT_GENDER_OPTIONS = [["", "(미지정)"], ["male", "남"], ["female", "여"], ["other", "기타"], ["undisclosed", "비공개"]];
+// 목록 표시용 라벨 맵(옵션 배열에서 파생).
+const PARTICIPANT_CAMPUS_LABELS = Object.fromEntries(PARTICIPANT_CAMPUS_OPTIONS);
+const PARTICIPANT_GRADE_LABELS = Object.fromEntries(PARTICIPANT_GRADE_OPTIONS);
+const PARTICIPANT_GENDER_LABELS = Object.fromEntries(PARTICIPANT_GENDER_OPTIONS);
 
 const tripStatusLabels = {
   open: "접수 중",
@@ -130,6 +147,7 @@ async function init() {
   bindFilters();
   bindInternal();
   bindConfig();
+  bindParticipants();
 
   try {
     const loaded = await loadSnapshot();
@@ -904,6 +922,11 @@ function logoutInternal() {
   clearNode(document.getElementById("internal-trip-body"));
   clearNode(document.getElementById("teachers-table-body"));
   clearNode(document.getElementById("staff-table-body"));
+  // 참석자 관리(PII) 상태·화면 초기화.
+  state.participants.list = [];
+  state.participants.private = {};
+  closeParticipantForm();
+  renderParticipants([], {}, true);
   showInternalView(false);
   setInternalMessage("로그아웃되었습니다.", false);
 }
@@ -1146,6 +1169,8 @@ function renderConfig() {
     modeNote.hidden = false;
     modeNote.textContent = "샘플(데모) 모드입니다. 실제 백엔드(config.js의 internalApiUrl)를 연결해야 설정을 저장할 수 있습니다.";
     applyConfigData(emptyConfigData(), true);
+    // 참석자 관리는 PII를 다루므로 샘플 모드에서 비활성(실서버에서만 조회/편집).
+    renderParticipants([], {}, true);
     return;
   }
 
@@ -1176,8 +1201,11 @@ async function loadConfig() {
     }
     state.config.loaded = true;
     applyConfigData(data, false);
+    // 설정 로드 성공 후 참석자 목록(PII)도 함께 불러온다(같은 토큰·서버).
+    loadParticipants();
   } catch (error) {
     applyConfigData(emptyConfigData(), true);
+    renderParticipants([], {}, true);
   } finally {
     state.config.loading = false;
   }
@@ -1457,3 +1485,262 @@ function configIssueText(issue) {
   const ref = (issue.ref != null && issue.ref !== "") ? ` [${issue.ref}]` : "";
   return `${issue.message || issue.code || "확인 필요"}${ref}`;
 }
+
+/* ── 참석자 관리(Phase B) ─────────────────────────────────
+   인증 토큰으로 get_participants/save_participant/deactivate_participant를 호출한다.
+   실명·연락처(PII)를 서버에서만 받아 화면에 표시하며 정적 저장하지 않는다.
+   값 주입은 textContent/value로만 하여 XSS를 방지한다. */
+function bindParticipants() {
+  fillSelect("cp-person_type", PARTICIPANT_PERSON_TYPE_OPTIONS);
+  fillSelect("cp-campus", PARTICIPANT_CAMPUS_OPTIONS);
+  fillSelect("cp-grade_band", PARTICIPANT_GRADE_OPTIONS);
+  fillSelect("cp-gender", PARTICIPANT_GENDER_OPTIONS);
+
+  const search = document.getElementById("config-participants-search");
+  if (search) search.addEventListener("input", () => {
+    state.participants.query = search.value || "";
+    renderParticipants(state.participants.list, state.participants.private, state.participants.disabled);
+  });
+  bindConfigClick("config-participants-add", () => openParticipantForm(null));
+  bindConfigClick("config-participant-cancel", closeParticipantForm);
+  bindConfigClick("config-participant-deactivate", onDeactivateParticipant);
+  const form = document.getElementById("config-participant-form");
+  if (form) form.addEventListener("submit", onSaveParticipant);
+}
+
+function fillSelect(id, options) {
+  const select = document.getElementById(id);
+  if (!select) return;
+  clearNode(select);
+  options.forEach(([value, label]) => {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    select.append(option);
+  });
+}
+
+async function loadParticipants() {
+  const apiUrl = String(window.CAMP_CONFIG?.internalApiUrl || "").trim();
+  if (!apiUrl || !state.config.token) { renderParticipants([], {}, true); return; }
+  try {
+    const data = await postConfigAction("get_participants", null);
+    if (data && data.error) {
+      if (handleConfigSessionError(data.error)) return;
+      renderParticipants([], {}, true);
+      return;
+    }
+    state.participants.list = Array.isArray(data.participants) ? data.participants : [];
+    state.participants.private = (data.private && typeof data.private === "object") ? data.private : {};
+    renderParticipants(state.participants.list, state.participants.private, false);
+  } catch (error) {
+    renderParticipants([], {}, true);
+  }
+}
+
+// 목록 렌더. disabled면 편집·추가를 잠그고 샘플/미연결 안내만 보인다.
+function renderParticipants(list, priv, disabled) {
+  state.participants.disabled = !!disabled;
+  const body = document.getElementById("config-participants-body");
+  if (!body) return;
+  clearNode(body);
+
+  const addButton = document.getElementById("config-participants-add");
+  if (addButton) addButton.disabled = !!disabled;
+
+  if (disabled) {
+    closeParticipantForm();
+    showConfigMsg("config-participants-msg", "샘플(데모) 모드에서는 참석자 관리를 사용할 수 없습니다. 실명·연락처는 실서버(백엔드 연결) 인증 화면에서만 조회·편집됩니다.", "info");
+    appendParticipantEmptyRow(body, "참석자 정보는 실서버에서만 표시됩니다.");
+    return;
+  }
+  clearConfigMsg("config-participants-msg");
+
+  const query = String(state.participants.query || "").trim().toLowerCase();
+  const filtered = (Array.isArray(list) ? list : []).filter((p) => {
+    if (!query) return true;
+    const haystack = [p.legal_name, personTypeLabels[p.person_type] || p.person_type, PARTICIPANT_CAMPUS_LABELS[p.campus] || p.campus, PARTICIPANT_GRADE_LABELS[p.grade_band] || p.grade_band]
+      .map((v) => String(v == null ? "" : v).toLowerCase()).join(" ");
+    return haystack.includes(query);
+  });
+
+  if (!filtered.length) {
+    appendParticipantEmptyRow(body, query ? "검색 결과가 없습니다." : "등록된 참석자가 없습니다.");
+    return;
+  }
+
+  filtered.forEach((p) => body.append(participantRowNode(p)));
+}
+
+function appendParticipantEmptyRow(body, text) {
+  const row = document.createElement("tr");
+  const cell = document.createElement("td");
+  cell.colSpan = 9;
+  cell.className = "empty-cell";
+  cell.textContent = text;
+  row.append(cell);
+  body.append(row);
+}
+
+function participantRowNode(p) {
+  const tr = document.createElement("tr");
+  if (!bool(p.active)) tr.classList.add("is-inactive");
+  appendTextElement(tr, "td", p.legal_name || "-", "full-name");
+  appendTextElement(tr, "td", personTypeLabels[p.person_type] || p.person_type || "-");
+  appendTextElement(tr, "td", PARTICIPANT_CAMPUS_LABELS[p.campus] || p.campus || "-");
+  appendTextElement(tr, "td", PARTICIPANT_GRADE_LABELS[p.grade_band] || p.grade_band || "-");
+  appendTextElement(tr, "td", PARTICIPANT_GENDER_LABELS[p.gender] || p.gender || "-");
+  // 색상만으로 상태를 구분하지 않고 아이콘+텍스트를 함께 쓴다.
+  appendTextElement(tr, "td", bool(p.public_consent) ? "✔ 동의" : "✖ 미동의");
+  const traits = [];
+  if (bool(p.newcomer)) traits.push("새친구");
+  if (bool(p.leader_candidate)) traits.push("리더");
+  appendTextElement(tr, "td", traits.length ? traits.join(", ") : "-");
+  appendTextElement(tr, "td", bool(p.active) ? "✔ 활성" : "⛔ 비활성");
+
+  const editCell = document.createElement("td");
+  const editButton = document.createElement("button");
+  editButton.type = "button";
+  editButton.className = "config-secondary config-row-edit";
+  editButton.textContent = "편집";
+  editButton.setAttribute("aria-label", `${p.legal_name || "참석자"} 편집`);
+  editButton.addEventListener("click", () => openParticipantForm(p));
+  editCell.append(editButton);
+  tr.append(editCell);
+  return tr;
+}
+
+// bool 유틸(시트의 'TRUE'/JS true/문자열 모두 수용). Core.bool과 동일 취지.
+function bool(value) {
+  if (value === true) return true;
+  if (value === false || value == null) return false;
+  const normalized = String(value).trim().toLowerCase();
+  return ["true", "1", "y", "yes", "예"].includes(normalized);
+}
+
+// 편집 폼 열기. participant=null이면 신규(추가), 객체면 수정(id 불변, 서버가 보존).
+function openParticipantForm(participant) {
+  if (state.participants.disabled) return;
+  const form = document.getElementById("config-participant-form");
+  if (!form) return;
+  clearConfigMsg("config-participant-form-msg");
+
+  const isEdit = !!(participant && participant.participant_id);
+  document.getElementById("config-participant-form-title").textContent = isEdit ? "참석자 수정" : "참석자 추가";
+  setVal("cp-participant_id", isEdit ? participant.participant_id : "");
+
+  const p = participant || {};
+  setVal("cp-legal_name", p.legal_name || "");
+  setVal("cp-public_name", p.public_name || "");
+  setVal("cp-person_type", p.person_type || "student");
+  setVal("cp-campus", p.campus || "");
+  setVal("cp-grade_band", p.grade_band || "");
+  setVal("cp-gender", p.gender || "");
+  setVal("cp-engagement_score", p.engagement_score != null && p.engagement_score !== "" ? p.engagement_score : 3);
+  setVal("cp-extraversion_score", p.extraversion_score != null && p.extraversion_score !== "" ? p.extraversion_score : 3);
+  setChecked("cp-newcomer", bool(p.newcomer));
+  setChecked("cp-leader_candidate", bool(p.leader_candidate));
+  setChecked("cp-public_consent", bool(p.public_consent));
+
+  // 민감필드는 get_participants의 private 맵에서만 채운다(목록 행에는 없음).
+  const privateFields = (isEdit && state.participants.private[participant.participant_id]) || {};
+  setVal("cp-phone", privateFields.phone || "");
+  setVal("cp-birth_date", privateFields.birth_date || "");
+  setVal("cp-guardian_phone", privateFields.guardian_phone || "");
+  setVal("cp-insurance_status", privateFields.insurance_status || "");
+  setVal("cp-private_note", privateFields.private_note || "");
+
+  // 비활성 버튼은 기존(수정) 대상에만 노출한다.
+  const deactivateButton = document.getElementById("config-participant-deactivate");
+  if (deactivateButton) deactivateButton.hidden = !isEdit;
+
+  form.hidden = false;
+  form.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  const nameInput = document.getElementById("cp-legal_name");
+  if (nameInput) nameInput.focus();
+}
+
+function closeParticipantForm() {
+  const form = document.getElementById("config-participant-form");
+  if (form) form.hidden = true;
+}
+
+function collectParticipantPayload() {
+  // 공개모델(participant)에는 민감필드를 절대 넣지 않는다(서버 PARTICIPANT_PRIVATE_LEAK 방어와 이중 안전).
+  const participant = {
+    person_type: getVal("cp-person_type"),
+    legal_name: getVal("cp-legal_name"),
+    public_name: getVal("cp-public_name"),
+    campus: getVal("cp-campus"),
+    grade_band: getVal("cp-grade_band"),
+    gender: getVal("cp-gender"),
+    engagement_score: getVal("cp-engagement_score"),
+    extraversion_score: getVal("cp-extraversion_score"),
+    newcomer: getChecked("cp-newcomer"),
+    leader_candidate: getChecked("cp-leader_candidate"),
+    public_consent: getChecked("cp-public_consent")
+  };
+  const id = getVal("cp-participant_id");
+  if (id) participant.participant_id = id;
+  const priv = {
+    phone: getVal("cp-phone"),
+    birth_date: getVal("cp-birth_date"),
+    guardian_phone: getVal("cp-guardian_phone"),
+    insurance_status: getVal("cp-insurance_status"),
+    private_note: getVal("cp-private_note")
+  };
+  return { participant, private: priv };
+}
+
+async function onSaveParticipant(event) {
+  event.preventDefault();
+  if (state.participants.disabled) return;
+  const msgId = "config-participant-form-msg";
+  clearConfigMsg(msgId);
+  const saveButton = document.getElementById("config-participant-save");
+  if (saveButton) saveButton.disabled = true;
+  try {
+    const data = await postConfigAction("save_participant", collectParticipantPayload());
+    if (data && data.error) {
+      if (handleConfigSessionError(data.error)) return;
+      showConfigMsg(msgId, CONFIG_ERROR_MESSAGES[data.error] || "저장하지 못했습니다.", "error", data.issues);
+      return;
+    }
+    closeParticipantForm();
+    await loadParticipants();
+    showConfigMsg("config-participants-msg", "참석자 정보를 저장했습니다.", "info");
+  } catch (error) {
+    showConfigMsg(msgId, CONFIG_ERROR_MESSAGES.temporarily_unavailable, "error");
+  } finally {
+    if (saveButton) saveButton.disabled = false;
+  }
+}
+
+async function onDeactivateParticipant() {
+  if (state.participants.disabled) return;
+  const id = getVal("cp-participant_id");
+  if (!id) return;
+  const name = getVal("cp-legal_name") || "이 참석자";
+  if (!window.confirm(`${name}을(를) 비활성 처리할까요? (삭제가 아니라 명단에서 숨겨지며 기존 배정은 유지됩니다.)`)) return;
+  const msgId = "config-participant-form-msg";
+  clearConfigMsg(msgId);
+  try {
+    const data = await postConfigAction("deactivate_participant", { participant_id: id });
+    if (data && data.error) {
+      if (handleConfigSessionError(data.error)) return;
+      showConfigMsg(msgId, CONFIG_ERROR_MESSAGES[data.error] || "처리하지 못했습니다.", "error");
+      return;
+    }
+    closeParticipantForm();
+    await loadParticipants();
+    showConfigMsg("config-participants-msg", "참석자를 비활성 처리했습니다.", "info");
+  } catch (error) {
+    showConfigMsg(msgId, CONFIG_ERROR_MESSAGES.temporarily_unavailable, "error");
+  }
+}
+
+// ── 폼 값 유틸(값 주입은 value/checked로만) ──
+function getVal(id) { const el = document.getElementById(id); return el ? el.value : ""; }
+function setVal(id, value) { const el = document.getElementById(id); if (el) el.value = value == null ? "" : String(value); }
+function getChecked(id) { const el = document.getElementById(id); return !!(el && el.checked); }
+function setChecked(id, value) { const el = document.getElementById(id); if (el) el.checked = !!value; }

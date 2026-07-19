@@ -1567,6 +1567,156 @@ var CampCore = (function () {
     return validationResult_(issues, sanitized);
   }
 
+  // ── 참석자 CRUD(Phase B) 순수 검증·감사 ─────────────────────────────────
+  // 인증 웹 CRUD로 들어온 참석자 공개모델을 enum/타입 검증하고, 민감필드를 Participant_Private로 분리한다.
+  // 실제 id 보존·upsert·change_id/changed_at 발급은 06_PublicApi.gs(publisher)가 담당한다.
+  var PARTICIPANT_PERSON_TYPES = ['student', 'teacher', 'staff'];
+  var PARTICIPANT_CAMPUSES = ['imd', 'suwan', 'other', '']; // 빈값 허용
+  var PARTICIPANT_GRADE_BANDS = ['middle_1', 'middle_2', 'middle_3', 'high_1', 'high_2', 'high_3', 'adult', 'unknown', '']; // 빈값 허용
+  var PARTICIPANT_GENDERS = ['male', 'female', 'other', 'undisclosed', '']; // 빈값 허용
+  var PARTICIPANT_SCORE_FIELDS = ['engagement_score', 'extraversion_score']; // 정수 1~5, 빈값이면 기본 3
+  var PARTICIPANT_BOOL_FIELDS = ['newcomer', 'leader_candidate', 'public_consent'];
+  // 공개모델 편집 허용 필드(Participants 공개 후보 테이블 컬럼 중 웹 편집 대상). Change_Log 공개 필드 집합과 동일하다.
+  var PARTICIPANT_PUBLIC_FIELDS = ['person_type', 'legal_name', 'public_name', 'public_consent', 'campus', 'grade_band', 'gender', 'engagement_score', 'extraversion_score', 'newcomer', 'leader_candidate'];
+  // 값만 검증하고 그대로 통과시키는 시스템 필드(id 불변·활성상태·앵커). 실제 보존은 06이 담당한다.
+  var PARTICIPANT_SYSTEM_FIELDS = ['participant_id', 'public_id', 'event_id', 'active', 'source_response_id'];
+  // 민감필드는 기존 ROSTER_PRIVATE_FIELDS(birth_date/phone/guardian_phone/insurance_status/private_note)를 그대로 재사용한다.
+
+  function validateParticipantInput(participant, privateFields) {
+    participant = participant || {};
+    privateFields = privateFields || {};
+    var issues = [];
+    var sanitizedParticipant = {};
+    var sanitizedPrivate = {};
+
+    // 1) 방어적 불변조건: 공개모델(participant)에 민감필드가 섞여 오면 차단(PII 누수 방지).
+    Object.keys(participant).forEach(function (key) {
+      if (ROSTER_PRIVATE_FIELDS.indexOf(key) >= 0 || key === 'free_text') {
+        issues.push(issue('PARTICIPANT_PRIVATE_LEAK', 'participant', key, '민감 필드가 공개모델로 전달되었습니다. Participant_Private로만 라우팅해야 합니다.'));
+      }
+    });
+
+    // 2) person_type enum(빈값은 기본 student). student/teacher/staff.
+    var personType = String(participant.person_type == null ? '' : participant.person_type).trim();
+    if (isBlank_(personType)) personType = 'student';
+    if (PARTICIPANT_PERSON_TYPES.indexOf(personType) < 0) {
+      issues.push(issue('PARTICIPANT_PERSON_TYPE_INVALID', 'participant', 'person_type', 'person_type는 student/teacher/staff 중 하나여야 합니다.'));
+    } else {
+      sanitizedParticipant.person_type = personType;
+    }
+
+    // 3) 빈값을 허용하는 enum 필드(campus/grade_band/gender).
+    validateParticipantEnum_('campus', PARTICIPANT_CAMPUSES, 'PARTICIPANT_CAMPUS_INVALID', 'campus는 imd/suwan/other 또는 빈값이어야 합니다.', participant, sanitizedParticipant, issues);
+    validateParticipantEnum_('grade_band', PARTICIPANT_GRADE_BANDS, 'PARTICIPANT_GRADE_BAND_INVALID', 'grade_band 값이 올바르지 않습니다.', participant, sanitizedParticipant, issues);
+    validateParticipantEnum_('gender', PARTICIPANT_GENDERS, 'PARTICIPANT_GENDER_INVALID', 'gender는 male/female/other/undisclosed 또는 빈값이어야 합니다.', participant, sanitizedParticipant, issues);
+
+    // 4) 성향 점수: 정수 1~5, 빈값이면 기본 3.
+    PARTICIPANT_SCORE_FIELDS.forEach(function (field) {
+      var raw = participant[field];
+      if (isBlank_(raw)) { sanitizedParticipant[field] = 3; return; }
+      var n = Number(raw);
+      if (!Number.isInteger(n) || n < 1 || n > 5) {
+        issues.push(issue('PARTICIPANT_SCORE_INVALID', 'participant', field, field + '는 1~5 사이의 정수여야 합니다.'));
+      } else {
+        sanitizedParticipant[field] = n;
+      }
+    });
+
+    // 5) bool 필드는 항상 정규화하여 포함한다.
+    PARTICIPANT_BOOL_FIELDS.forEach(function (field) {
+      sanitizedParticipant[field] = bool(participant[field]);
+    });
+
+    // 6) legal_name: 신규(participant_id 없음)면 필수, 기존이면 제공 시 유지.
+    var isNew = isBlank_(participant.participant_id);
+    var legalName = String(participant.legal_name == null ? '' : participant.legal_name).trim();
+    if (isNew && isBlank_(legalName)) {
+      issues.push(issue('PARTICIPANT_LEGAL_NAME_REQUIRED', 'participant', 'legal_name', '신규 참석자는 실명(legal_name)이 필요합니다.'));
+    } else if (!isBlank_(legalName)) {
+      sanitizedParticipant.legal_name = legalName;
+    }
+
+    // 7) public_name은 자유(선택). 값이 오면 트림하여 유지한다.
+    if (participant.public_name != null) sanitizedParticipant.public_name = String(participant.public_name).trim();
+
+    // 8) 시스템 필드는 값만 통과시킨다(id 불변 보존은 06 담당).
+    PARTICIPANT_SYSTEM_FIELDS.forEach(function (field) {
+      if (isBlank_(participant[field])) return;
+      sanitizedParticipant[field] = field === 'active' ? bool(participant[field]) : participant[field];
+    });
+
+    // 9) 민감필드는 sanitizedPrivate로만 분리(routePrivateFields와 동일 원칙). 미허용 키는 무시.
+    Object.keys(privateFields).forEach(function (key) {
+      if (ROSTER_PRIVATE_FIELDS.indexOf(key) >= 0) sanitizedPrivate[key] = privateFields[key];
+      else if (key === 'free_text' && !isBlank_(privateFields.free_text) && isBlank_(privateFields.private_note)) sanitizedPrivate.private_note = privateFields.free_text;
+    });
+
+    return {
+      ok: blockingIssues(issues).length === 0,
+      issues: issues,
+      sanitizedParticipant: sanitizedParticipant,
+      sanitizedPrivate: sanitizedPrivate
+    };
+  }
+
+  function validateParticipantEnum_(field, allowed, code, message, participant, sanitized, issues) {
+    var v = String(participant[field] == null ? '' : participant[field]).trim();
+    if (allowed.indexOf(v) < 0) issues.push(issue(code, 'participant', field, message));
+    else sanitized[field] = v;
+  }
+
+  // 참석자 변경 감사행을 만든다. 공개필드는 old/new 원값, 민감필드는 old/new 모두 '[REDACTED]'.
+  // 변경된 필드만 포함하며, change_id/changed_at는 06_PublicApi.gs에서 발급한다. reason='admin_web'.
+  function buildParticipantChangeRows(oldParticipant, newParticipant, oldPrivate, newPrivate, participantId, changedBy) {
+    oldParticipant = oldParticipant || {};
+    newParticipant = newParticipant || {};
+    oldPrivate = oldPrivate || {};
+    newPrivate = newPrivate || {};
+    var rows = [];
+
+    // 공개필드: 이번 저장에서 다룬(new에 존재) 필드 중 값이 바뀐 것만 원값으로 기록.
+    PARTICIPANT_PUBLIC_FIELDS.forEach(function (field) {
+      if (!Object.prototype.hasOwnProperty.call(newParticipant, field)) return;
+      var oldValue = oldParticipant[field];
+      var newValue = newParticipant[field];
+      if (participantFieldEqual_(field, oldValue, newValue)) return;
+      rows.push(participantChangeRow_('participant', participantId, field, participantAuditValue_(oldValue), participantAuditValue_(newValue), changedBy));
+    });
+
+    // 민감필드: 값이 바뀐 것만, old/new 모두 '[REDACTED]'로 기록(원문은 Change_Log에 남기지 않는다).
+    ROSTER_PRIVATE_FIELDS.forEach(function (field) {
+      if (!Object.prototype.hasOwnProperty.call(newPrivate, field)) return;
+      if (String(oldPrivate[field] == null ? '' : oldPrivate[field]) === String(newPrivate[field] == null ? '' : newPrivate[field])) return;
+      rows.push(participantChangeRow_('participant_private', participantId, field, '[REDACTED]', '[REDACTED]', changedBy));
+    });
+
+    return rows;
+  }
+
+  function participantFieldEqual_(field, oldValue, newValue) {
+    if (PARTICIPANT_BOOL_FIELDS.indexOf(field) >= 0) return bool(oldValue) === bool(newValue);
+    return String(oldValue == null ? '' : oldValue) === String(newValue == null ? '' : newValue);
+  }
+
+  // 감사 로그에 남길 표현값: bool은 TRUE/FALSE 문자열, 그 외는 빈값 정규화한 원값.
+  function participantAuditValue_(value) {
+    if (value === true) return 'TRUE';
+    if (value === false) return 'FALSE';
+    return value == null ? '' : value;
+  }
+
+  function participantChangeRow_(entityType, participantId, field, oldValue, newValue, changedBy) {
+    return {
+      entity_type: entityType,
+      entity_id: participantId == null ? '' : String(participantId),
+      field_name: field,
+      old_value: oldValue,
+      new_value: newValue,
+      changed_by: changedBy == null ? '' : String(changedBy),
+      reason: 'admin_web'
+    };
+  }
+
   return {
     issue: issue,
     bool: bool,
@@ -1587,6 +1737,8 @@ var CampCore = (function () {
     routePrivateFields: routePrivateFields,
     findRosterPrivateLeak: findRosterPrivateLeak,
     planRosterUpsert: planRosterUpsert,
+    validateParticipantInput: validateParticipantInput,
+    buildParticipantChangeRows: buildParticipantChangeRows,
     computeDistributionStats: computeDistributionStats,
     incrementalGroupPenalty: incrementalGroupPenalty,
     computeGroupProposal: computeGroupProposal,

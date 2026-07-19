@@ -830,4 +830,98 @@ assert.ok(ruleCodes(vehiclesSmall.issues).includes('VEHICLE_CAPACITY_INVALID'));
 // EDITABLE_SETTINGS_KEYS 화이트리스트에 커서/상태키가 없음을 확인
 ['LAST_SYNC_ROW_STUDENTS', 'PUBLISH_STATUS', 'LAST_PUBLISH_ID', 'ROSTER_MAX_ROWS', 'EVENT_ID'].forEach((k) => assert.ok(Core.EDITABLE_SETTINGS_KEYS.indexOf(k) < 0, k + '는 편집 불가여야 함'));
 
+// ── Phase B: validateParticipantInput ────────────────────────────────────
+// 정상 통과: 공개모델은 sanitizedParticipant, 민감필드는 sanitizedPrivate로 분리된다.
+const partOk = Core.validateParticipantInput(
+  {
+    participant_id: 'pt_A', public_id: 'P-ABC234',
+    person_type: 'student', legal_name: '홍길동', public_name: '길동',
+    campus: 'imd', grade_band: 'middle_1', gender: 'male',
+    engagement_score: 4, extraversion_score: '2',
+    newcomer: 'yes', leader_candidate: false, public_consent: 'true', active: 'true'
+  },
+  { birth_date: '2012-03-01', phone: '010-1111-2222', private_note: '메모' }
+);
+assert.strictEqual(partOk.ok, true);
+assert.strictEqual(partOk.sanitizedParticipant.person_type, 'student');
+assert.strictEqual(partOk.sanitizedParticipant.engagement_score, 4);
+assert.strictEqual(partOk.sanitizedParticipant.extraversion_score, 2); // 문자 '2' → 정수 2
+assert.strictEqual(partOk.sanitizedParticipant.newcomer, true);
+assert.strictEqual(partOk.sanitizedParticipant.public_consent, true);
+assert.strictEqual(partOk.sanitizedParticipant.legal_name, '홍길동');
+assert.strictEqual(partOk.sanitizedParticipant.participant_id, 'pt_A'); // 시스템 필드는 값만 통과
+// 민감필드는 공개모델에 남지 않고 sanitizedPrivate에만 존재
+assert.strictEqual(partOk.sanitizedParticipant.phone, undefined);
+assert.strictEqual(partOk.sanitizedParticipant.birth_date, undefined);
+assert.strictEqual(partOk.sanitizedPrivate.phone, '010-1111-2222');
+assert.strictEqual(partOk.sanitizedPrivate.private_note, '메모');
+
+// 빈값 허용 enum + 점수 기본값(3)
+const partDefaults = Core.validateParticipantInput({ participant_id: 'pt_B', legal_name: '김철수', campus: '', grade_band: '', gender: '' }, {});
+assert.strictEqual(partDefaults.ok, true);
+assert.strictEqual(partDefaults.sanitizedParticipant.engagement_score, 3);
+assert.strictEqual(partDefaults.sanitizedParticipant.extraversion_score, 3);
+assert.strictEqual(partDefaults.sanitizedParticipant.person_type, 'student'); // 빈 person_type → 기본 student
+
+// 거부: 잘못된 enum들
+assert.ok(ruleCodes(Core.validateParticipantInput({ participant_id: 'pt_A', person_type: 'guest' }, {}).issues).includes('PARTICIPANT_PERSON_TYPE_INVALID'));
+assert.ok(ruleCodes(Core.validateParticipantInput({ participant_id: 'pt_A', campus: 'gwangju' }, {}).issues).includes('PARTICIPANT_CAMPUS_INVALID'));
+assert.ok(ruleCodes(Core.validateParticipantInput({ participant_id: 'pt_A', grade_band: 'college' }, {}).issues).includes('PARTICIPANT_GRADE_BAND_INVALID'));
+assert.ok(ruleCodes(Core.validateParticipantInput({ participant_id: 'pt_A', gender: 'unknown' }, {}).issues).includes('PARTICIPANT_GENDER_INVALID'));
+// 거부: 점수 범위(0·6)
+const scoreLow = Core.validateParticipantInput({ participant_id: 'pt_A', engagement_score: 0 }, {});
+assert.strictEqual(scoreLow.ok, false);
+assert.ok(ruleCodes(scoreLow.issues).includes('PARTICIPANT_SCORE_INVALID'));
+assert.ok(ruleCodes(Core.validateParticipantInput({ participant_id: 'pt_A', extraversion_score: 6 }, {}).issues).includes('PARTICIPANT_SCORE_INVALID'));
+// 거부: 신규(participant_id 없음)인데 legal_name 누락
+const newNoName = Core.validateParticipantInput({ person_type: 'student' }, {});
+assert.strictEqual(newNoName.ok, false);
+assert.ok(ruleCodes(newNoName.issues).includes('PARTICIPANT_LEGAL_NAME_REQUIRED'));
+// 거부: 공개모델에 민감필드(phone) 유입 → PARTICIPANT_PRIVATE_LEAK, 값은 공개모델에 남지 않음
+const leak = Core.validateParticipantInput({ participant_id: 'pt_A', legal_name: '홍길동', phone: '010-9999-8888' }, {});
+assert.strictEqual(leak.ok, false);
+assert.ok(ruleCodes(leak.issues).includes('PARTICIPANT_PRIVATE_LEAK'));
+assert.strictEqual(leak.sanitizedParticipant.phone, undefined);
+
+// ── Phase B: buildParticipantChangeRows ──────────────────────────────────
+// 공개필드 변경은 원값 기록, 민감필드 변경은 [REDACTED], 미변경 필드는 제외, changed_by 반영.
+const changeRows = Core.buildParticipantChangeRows(
+  { campus: 'imd', grade_band: 'middle_1', engagement_score: 3, newcomer: false },
+  { campus: 'suwan', grade_band: 'middle_1', engagement_score: 4, newcomer: true }, // grade_band 미변경
+  { phone: '010-1111-2222', private_note: '기존' },
+  { phone: '010-3333-4444', private_note: '기존' }, // private_note 미변경
+  'pt_A', 'admin@example.com'
+);
+const byField = {};
+changeRows.forEach((r) => { byField[r.field_name] = r; });
+// grade_band(미변경)·private_note(미변경)는 제외
+assert.strictEqual(byField.grade_band, undefined);
+assert.strictEqual(byField.private_note, undefined);
+// 공개필드: 원값 기록
+assert.strictEqual(byField.campus.entity_type, 'participant');
+assert.strictEqual(byField.campus.old_value, 'imd');
+assert.strictEqual(byField.campus.new_value, 'suwan');
+assert.strictEqual(byField.engagement_score.old_value, 3);
+assert.strictEqual(byField.engagement_score.new_value, 4);
+assert.strictEqual(byField.newcomer.old_value, 'FALSE'); // bool → TRUE/FALSE 표현
+assert.strictEqual(byField.newcomer.new_value, 'TRUE');
+// 민감필드: old/new 모두 [REDACTED], 원문 미노출
+assert.strictEqual(byField.phone.entity_type, 'participant_private');
+assert.strictEqual(byField.phone.old_value, '[REDACTED]');
+assert.strictEqual(byField.phone.new_value, '[REDACTED]');
+// 공통: entity_id / changed_by / reason
+changeRows.forEach((r) => {
+  assert.strictEqual(r.entity_id, 'pt_A');
+  assert.strictEqual(r.changed_by, 'admin@example.com');
+  assert.strictEqual(r.reason, 'admin_web');
+});
+// 신규 생성(old 빈값 기준): new에 존재하는 변경 필드만 기록된다.
+const createRows = Core.buildParticipantChangeRows(
+  {}, { campus: 'imd', engagement_score: 3, newcomer: false }, {}, { phone: '010-1' }, 'pt_NEW', 'admin@example.com'
+);
+const createFields = createRows.map((r) => r.field_name);
+assert.ok(createFields.includes('campus'));
+assert.ok(createFields.includes('phone'));
+assert.strictEqual(createRows.find((r) => r.field_name === 'phone').new_value, '[REDACTED]');
+
 console.log('Core tests passed');

@@ -403,6 +403,10 @@ function doPost(e) {
       case 'save_groups': return withDocumentLock_(function () { return handleSaveGroups_(body); });
       case 'save_rooms': return withDocumentLock_(function () { return handleSaveRooms_(body); });
       case 'save_vehicles': return withDocumentLock_(function () { return handleSaveVehicles_(body); });
+      // ── 참석자 CRUD(Phase B): 실명·연락처(PII)를 인증 관리자에게만 노출/편집한다. 정적 저장 금지. ──
+      case 'get_participants': return handleGetParticipants_();
+      case 'save_participant': return withDocumentLock_(function () { return handleSaveParticipant_(body, verdict.user); });
+      case 'deactivate_participant': return withDocumentLock_(function () { return handleDeactivateParticipant_(body, verdict.user); });
       case 'ensure_group_count': return runMenuMutation_(ensureGroupCountFromSettings);
       case 'ensure_room_count': return runMenuMutation_(ensureRoomCountFromSettings);
       default: return jsonResponse_({ error: 'not_found' });
@@ -817,6 +821,203 @@ function buildNewVehicleRows_(existingRows, count, eventId) {
     });
   }
   return rows;
+}
+
+// ── 참석자 CRUD(Phase B) 웹 핸들러 ─────────────────────────────────
+// PII(실명·전화·생년월일·보호자연락처·보험·비공개메모)를 인증 관리자에게만 노출/편집한다.
+// 순수 검증·감사행 계획은 Core.js(validateParticipantInput/buildParticipantChangeRows)가, id 보존·발급·시트 upsert는 여기서 담당한다.
+
+// 웹 편집이 가능한 공개모델 필드(Core.PARTICIPANT_PUBLIC_FIELDS와 동일 집합).
+// participant_id/public_id/source_response_id는 여기에 없어 절대 덮어쓰지 않는다(id 불변).
+var PARTICIPANT_WRITABLE_FIELDS = ['person_type', 'legal_name', 'public_name', 'public_consent', 'campus', 'grade_band', 'gender', 'engagement_score', 'extraversion_score', 'newcomer', 'leader_candidate'];
+
+// Participant_Private 민감필드(라우팅·조회 대상). Change_Log에는 [REDACTED]로만 남는다.
+var PARTICIPANT_PRIVATE_FIELDS = ['birth_date', 'phone', 'guardian_phone', 'insurance_status', 'private_note'];
+
+// Change_Log 감사행에 change_id(UUID)·changed_at(now)를 발급해 시트 스키마에 맞춘다(빌더는 이 두 컬럼을 넣지 않는다).
+function stampChangeRows_(rows) {
+  return (rows || []).map(function (row) {
+    return {
+      change_id: 'chg_' + Utilities.getUuid().replace(/-/g, ''),
+      entity_type: row.entity_type,
+      entity_id: row.entity_id,
+      field_name: row.field_name,
+      old_value: row.old_value,
+      new_value: row.new_value,
+      changed_at: nowIso_(),
+      changed_by: row.changed_by,
+      reason: row.reason
+    };
+  });
+}
+
+// 참석자 목록(편집용) 반환: 공개모델 + legal_name + active, 그리고 민감필드는 private 맵으로 분리.
+// PII 포함 — 토큰 인증자 전용이며 정적 파일로 저장하지 않는다.
+function handleGetParticipants_() {
+  var participantRows = tableRows_(getSheetRequired_(CAMP.SHEETS.PARTICIPANTS));
+  var privateRows = tableRows_(getSheetRequired_(CAMP.SHEETS.PRIVATE));
+
+  var privateById = {};
+  privateRows.forEach(function (row) {
+    var id = String(row.participant_id == null ? '' : row.participant_id).trim();
+    if (!id) return;
+    var entry = {};
+    PARTICIPANT_PRIVATE_FIELDS.forEach(function (field) {
+      entry[field] = String(row[field] == null ? '' : row[field]);
+    });
+    privateById[id] = entry;
+  });
+
+  var participants = [];
+  var privateMap = {};
+  participantRows.forEach(function (row) {
+    var id = String(row.participant_id == null ? '' : row.participant_id).trim();
+    if (!id) return;
+    participants.push({
+      participant_id: id,
+      public_id: String(row.public_id == null ? '' : row.public_id),
+      person_type: String(row.person_type == null ? '' : row.person_type),
+      legal_name: String(row.legal_name == null ? '' : row.legal_name),
+      public_name: String(row.public_name == null ? '' : row.public_name),
+      public_consent: CampCore.bool(row.public_consent),
+      campus: String(row.campus == null ? '' : row.campus),
+      grade_band: String(row.grade_band == null ? '' : row.grade_band),
+      gender: String(row.gender == null ? '' : row.gender),
+      engagement_score: numOrBlank_(row.engagement_score),
+      extraversion_score: numOrBlank_(row.extraversion_score),
+      newcomer: CampCore.bool(row.newcomer),
+      leader_candidate: CampCore.bool(row.leader_candidate),
+      active: CampCore.bool(row.active)
+    });
+    // 민감필드는 존재하는 참석자에 한해서만 노출한다(고아 private 행 미노출).
+    privateMap[id] = privateById[id] || { birth_date: '', phone: '', guardian_phone: '', insurance_status: '', private_note: '' };
+  });
+
+  return jsonResponse_({ ok: true, participants: participants, private: privateMap });
+}
+
+// 참석자 신규/수정(upsert). participant_id가 기존 행에 있으면 in-place 수정(id 불변), 없으면 신규 발급.
+function handleSaveParticipant_(body, changedBy) {
+  var payload = body.payload;
+  // 빈 payload 가드(Phase A F1 패턴): participant 객체가 없으면 시트를 건드리지 않는다.
+  if (!payload || typeof payload !== 'object' || !payload.participant || typeof payload.participant !== 'object') {
+    return jsonResponse_({ error: 'invalid_input' });
+  }
+  var inputPrivate = (payload.private && typeof payload.private === 'object') ? payload.private : {};
+
+  // (a) 순수 검증: enum·점수·PII 누수 차단. 실패면 시트 변경 없이 중단.
+  var result = CampCore.validateParticipantInput(payload.participant, inputPrivate);
+  if (!result.ok) return jsonResponse_({ error: 'invalid_input', issues: adminBlockingIssues_(result.issues) });
+  var sanitized = result.sanitizedParticipant;
+  var sanitizedPrivate = result.sanitizedPrivate;
+
+  var participantSheet = getSheetRequired_(CAMP.SHEETS.PARTICIPANTS);
+  var privateSheet = getSheetRequired_(CAMP.SHEETS.PRIVATE);
+  var participantIdx = headerIndex_(participantSheet);
+  var privateIdx = headerIndex_(privateSheet);
+  var existingParticipants = tableRows_(participantSheet);
+  var byId = indexRowsById_(existingParticipants, 'participant_id');
+  var privById = indexRowsById_(tableRows_(privateSheet), 'participant_id');
+
+  // 편집 payload의 participant_id는 기존 행에 존재할 때만 수정 대상으로 신뢰한다(id 재발급·주입 방지).
+  var requestedId = String(payload.participant.participant_id == null ? '' : payload.participant.participant_id).trim();
+  var existingRow = (requestedId && byId[requestedId]) ? byId[requestedId] : null;
+
+  var participantId;
+  var changeRows;
+
+  if (existingRow) {
+    // (수정) 기존 행의 id를 신뢰한다. participant_id/public_id/source_response_id는 절대 쓰지 않는다.
+    participantId = String(existingRow.participant_id);
+    var oldPrivateRow = privById[participantId] || {};
+
+    PARTICIPANT_WRITABLE_FIELDS.forEach(function (field) {
+      if (Object.prototype.hasOwnProperty.call(sanitized, field)) {
+        setCellIf_(participantSheet, existingRow._row, participantIdx, field, sanitized[field]);
+      }
+    });
+    if (participantIdx.updated_at != null) participantSheet.getRange(existingRow._row, participantIdx.updated_at + 1).setValue(nowIso_());
+
+    var privateFields = Object.keys(sanitizedPrivate);
+    if (privateFields.length) {
+      if (privById[participantId]) {
+        privateFields.forEach(function (field) { setCellIf_(privateSheet, privById[participantId]._row, privateIdx, field, sanitizedPrivate[field]); });
+      } else {
+        var newPriv = { participant_id: participantId };
+        privateFields.forEach(function (field) { newPriv[field] = sanitizedPrivate[field]; });
+        appendObjects_(CAMP.SHEETS.PRIVATE, [newPriv]);
+      }
+    }
+
+    changeRows = CampCore.buildParticipantChangeRows(existingRow, sanitized, oldPrivateRow, sanitizedPrivate, participantId, changedBy);
+  } else {
+    // (신규) pt_+UUID / generatePublicId_. public_consent 기본 false·public_name 기본 ''는 sanitized에 이미 정규화되어 있다.
+    participantId = 'pt_' + Utilities.getUuid().replace(/-/g, '');
+    var publicIds = existingParticipants.reduce(function (map, row) { if (row.public_id) map[String(row.public_id)] = true; return map; }, {});
+    var publicId = generatePublicId_(publicIds);
+    var eventId = (getSettings_().EVENT_ID) || CAMP.DEFAULT_SETTINGS.EVENT_ID;
+
+    appendObjects_(CAMP.SHEETS.PARTICIPANTS, [{
+      participant_id: participantId,
+      event_id: eventId,
+      person_type: sanitized.person_type == null ? 'student' : sanitized.person_type,
+      legal_name: sanitized.legal_name == null ? '' : sanitized.legal_name,
+      public_id: publicId,
+      public_name: sanitized.public_name == null ? '' : sanitized.public_name,
+      public_consent: sanitized.public_consent,
+      campus: sanitized.campus == null ? '' : sanitized.campus,
+      grade_band: sanitized.grade_band == null ? '' : sanitized.grade_band,
+      gender: sanitized.gender == null ? '' : sanitized.gender,
+      engagement_score: sanitized.engagement_score,
+      newcomer: sanitized.newcomer,
+      leader_candidate: sanitized.leader_candidate,
+      active: true,
+      source_response_id: '',
+      updated_at: nowIso_(),
+      extraversion_score: sanitized.extraversion_score
+    }]);
+
+    var newPrivateRow = { participant_id: participantId };
+    Object.keys(sanitizedPrivate).forEach(function (field) { newPrivateRow[field] = sanitizedPrivate[field]; });
+    appendObjects_(CAMP.SHEETS.PRIVATE, [newPrivateRow]);
+
+    changeRows = CampCore.buildParticipantChangeRows({}, sanitized, {}, sanitizedPrivate, participantId, changedBy);
+  }
+
+  var changeLog = stampChangeRows_(changeRows);
+  if (changeLog.length) appendObjects_(CAMP.SHEETS.CHANGE_LOG, changeLog);
+  return jsonResponse_({ ok: true, participant_id: participantId, warnings: adminWarnings_(result.issues) });
+}
+
+// 참석자 비활성(삭제 금지). active=false만 setValue하고 배정은 건드리지 않는다. Change_Log에 감사 기록.
+function handleDeactivateParticipant_(body, changedBy) {
+  var payload = body.payload;
+  var participantId = String((payload && payload.participant_id) == null ? '' : payload.participant_id).trim();
+  if (!participantId) return jsonResponse_({ error: 'invalid_input' });
+
+  var participantSheet = getSheetRequired_(CAMP.SHEETS.PARTICIPANTS);
+  var idx = headerIndex_(participantSheet);
+  var row = indexRowsById_(tableRows_(participantSheet), 'participant_id')[participantId];
+  if (!row) return jsonResponse_({ error: 'invalid_input' });
+  if (idx.active == null) return jsonResponse_({ error: 'temporarily_unavailable' });
+
+  var wasActive = CampCore.bool(row.active);
+  participantSheet.getRange(row._row, idx.active + 1).setValue(false);
+  if (idx.updated_at != null) participantSheet.getRange(row._row, idx.updated_at + 1).setValue(nowIso_());
+
+  // active는 공개필드 집합(PARTICIPANT_PUBLIC_FIELDS)에 없어 빌더가 기록하지 않으므로 여기서 직접 감사행을 남긴다.
+  if (wasActive) {
+    appendObjects_(CAMP.SHEETS.CHANGE_LOG, stampChangeRows_([{
+      entity_type: 'participant',
+      entity_id: participantId,
+      field_name: 'active',
+      old_value: 'TRUE',
+      new_value: 'FALSE',
+      changed_by: changedBy == null ? '' : String(changedBy),
+      reason: 'admin_web'
+    }]));
+  }
+  return jsonResponse_({ ok: true, participant_id: participantId });
 }
 
 function jsonResponse_(payload) {

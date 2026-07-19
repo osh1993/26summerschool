@@ -1203,6 +1203,89 @@ summary:focus-visible {
   font-weight: 600;
 }
 
+/* ── 참석자 관리(Phase B, PII) ── */
+.config-warn-banner {
+  margin: 0 0 12px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  border-left: 5px solid var(--red);
+  background: var(--red-pale);
+  color: var(--red);
+  font-weight: 800;
+  font-size: 0.9rem;
+}
+
+.config-participants-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.config-participants-toolbar .field {
+  flex: 1 1 200px;
+}
+
+.config-participants-toolbar .config-secondary {
+  flex: 0 0 auto;
+}
+
+/* 비활성 참석자 행은 색상만이 아니라 텍스트(⛔ 비활성)로도 구분하며 흐리게 표시한다. */
+.config-participants-body .is-inactive,
+tr.is-inactive {
+  opacity: 0.6;
+}
+
+.config-row-edit {
+  min-height: 36px;
+  padding: 0 12px;
+}
+
+.config-participant-form {
+  margin-top: 16px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #f7fafc;
+}
+
+.config-participant-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.config-participant-private {
+  margin: 16px 0 0;
+  padding: 12px 14px 14px;
+  border: 1px dashed var(--red);
+  border-radius: 10px;
+  background: #fff;
+}
+
+.config-participant-private legend {
+  padding: 0 6px;
+  color: var(--red);
+  font-weight: 800;
+  font-size: 0.88rem;
+}
+
+.field-check {
+  display: flex;
+  flex-direction: row-reverse;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.field-check input[type="checkbox"] {
+  width: 22px;
+  min-height: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+}
+
 [hidden] {
   display: none !important;
 }
@@ -1237,7 +1320,8 @@ summary:focus-visible {
     grid-template-columns: 1fr;
   }
 
-  .config-settings {
+  .config-settings,
+  .config-participant-grid {
     grid-template-columns: 1fr;
   }
 
