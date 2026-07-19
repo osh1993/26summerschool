@@ -106,6 +106,12 @@ var EDITABLE_SETTINGS_KEYS = Object.freeze([
 //   - Apps Script 편집기 > 프로젝트 설정 > 스크립트 속성에 임의의 긴 무작위 문자열로 설정한다.
 //   - 이 저장소나 코드에는 절대 값을 하드코딩하지 않는다(여기에는 이름만 문서화).
 //   - 미설정 시 verifyAuthToken이 bad_signature로 거부하므로 쓰기가 안전 기본값(비활성)으로 잠긴다.
+//
+// [Script Property] CAMP_INTERNAL_TOKEN_VERSION (선택)
+//   웹 관리자 쓰기 토큰의 세대(무효화 스위치). 미설정이면 '1'로 간주한다.
+//   - 토큰이 유출됐거나 즉시 전원 로그아웃이 필요하면 이 값을 다른 문자열로 바꾼다(예: '1'→'2').
+//     이전 세대에 발급된 토큰은 서명이 유효해도 전부 revoked로 거부되어, 관리자는 재로그인해야 한다.
+//   - 만료(TTL 30분)와 별개의 즉시 무효화 수단이다.
 
 function campSpreadsheet_() {
   var spreadsheet = SpreadsheetApp.getActiveSpreadsheet();

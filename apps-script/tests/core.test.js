@@ -711,8 +711,8 @@ const badSig = Core.verifyAuthToken(tamperedSig, T0 + 1000, TOKEN_SECRET, hmacHe
 assert.strictEqual(badSig.ok, false);
 assert.strictEqual(badSig.reason, 'bad_signature');
 
-// payload 변조: base64url payload를 다른 값으로 교체하면 서명 불일치
-const forgedPayload = Buffer.from('intruder|' + (T0 + TTL), 'utf8').toString('base64url');
+// payload 변조: base64url payload(구조는 유효한 3-파트)를 다른 값으로 교체하면 서명 불일치
+const forgedPayload = Buffer.from('intruder|1|' + (T0 + TTL), 'utf8').toString('base64url');
 const forgedToken = forgedPayload + '.' + goodToken.split('.')[1];
 const forged = Core.verifyAuthToken(forgedToken, T0 + 1000, TOKEN_SECRET, hmacHex);
 assert.strictEqual(forged.ok, false);
@@ -722,6 +722,26 @@ assert.strictEqual(forged.reason, 'bad_signature');
 assert.strictEqual(Core.verifyAuthToken('no-dot-token', T0, TOKEN_SECRET, hmacHex).reason, 'malformed');
 assert.strictEqual(Core.verifyAuthToken('.sig', T0, TOKEN_SECRET, hmacHex).reason, 'malformed');
 assert.strictEqual(Core.verifyAuthToken('payload.', T0, TOKEN_SECRET, hmacHex).reason, 'malformed');
+// 구형 2-파트 토큰(user|exp, 버전 세그먼트 없음)은 서명이 맞아도 malformed로 거부 → 재로그인
+const legacyPayload = 'camp|' + (T0 + TTL);
+const legacyToken = Buffer.from(legacyPayload, 'utf8').toString('base64url') + '.' + hmacHex(TOKEN_SECRET, legacyPayload);
+assert.strictEqual(Core.verifyAuthToken(legacyToken, T0 + 1000, TOKEN_SECRET, hmacHex).reason, 'malformed');
+
+// ── 토큰 무효화(세대/버전) ─────────────────────────────────────────────
+// 버전 명시 발급 → 같은 버전으로 검증 성공
+const v1Token = Core.issueAuthToken('camp', T0, TTL, TOKEN_SECRET, hmacHex, '1');
+assert.strictEqual(Core.verifyAuthToken(v1Token, T0 + 1000, TOKEN_SECRET, hmacHex, '1').ok, true);
+// 서버 세대가 바뀌면(1→2) 서명이 유효한 정품 토큰도 revoked로 거부
+const revoked = Core.verifyAuthToken(v1Token, T0 + 1000, TOKEN_SECRET, hmacHex, '2');
+assert.strictEqual(revoked.ok, false);
+assert.strictEqual(revoked.reason, 'revoked');
+// 무효화는 서명 검증을 통과한 뒤에만 판정된다(위조 토큰은 여전히 bad_signature 우선)
+const forgedV = Buffer.from('intruder|2|' + (T0 + TTL), 'utf8').toString('base64url') + '.' + v1Token.split('.')[1];
+assert.strictEqual(Core.verifyAuthToken(forgedV, T0 + 1000, TOKEN_SECRET, hmacHex, '2').reason, 'bad_signature');
+// 빈 버전은 양쪽 모두 '1' 기본값으로 정규화되어 호환(미설정 운영)
+const vDefault = Core.issueAuthToken('camp', T0, TTL, TOKEN_SECRET, hmacHex, '');
+assert.strictEqual(Core.verifyAuthToken(vDefault, T0 + 1000, TOKEN_SECRET, hmacHex, '').ok, true);
+assert.strictEqual(Core.verifyAuthToken(v1Token, T0 + 1000, TOKEN_SECRET, hmacHex, '').ok, true); // '1' vs 미설정('1')
 
 // 비밀키 빈값: ok:false, reason 'bad_signature'(쓰기 안전 기본값 잠금)
 assert.deepStrictEqual(Core.verifyAuthToken(goodToken, T0 + 1000, '', hmacHex), { ok: false, user: null, reason: 'bad_signature' });

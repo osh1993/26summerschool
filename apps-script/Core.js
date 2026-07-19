@@ -1324,19 +1324,30 @@ var CampCore = (function () {
     return bytesToUtf8_(bytes);
   }
 
-  // 발급: user·발급시각·수명·비밀키·HMAC함수 → 서명 토큰 문자열.
-  function issueAuthToken(user, issuedAtMs, ttlMs, secret, hmacHexFn) {
+  // 토큰 버전을 문자열로 정규화한다. 빈값은 '1'로 간주해(기본 세대) 미설정 운영과 호환한다.
+  // '|'는 페이로드 구분자이므로 버전에서 제거해 파싱 모호성을 없앤다.
+  function normalizeTokenVersion_(value) {
+    var text = String(value == null ? '' : value).trim().replace(/\|/g, '');
+    return text === '' ? '1' : text;
+  }
+
+  // 발급: user·발급시각·수명·비밀키·HMAC함수·토큰버전 → 서명 토큰 문자열.
+  // 페이로드 = user|version|expMs. version은 서버 Script Property로 관리하며, 값을 바꾸면
+  // 이전 세대에 발급된 토큰이 전부 'revoked'로 거부된다(유출 대응 무효화 스위치).
+  function issueAuthToken(user, issuedAtMs, ttlMs, secret, hmacHexFn, tokenVersion) {
     if (typeof hmacHexFn !== 'function') throw new Error('hmacHexFn required');
     var expMs = number(issuedAtMs, 0) + number(ttlMs, 0);
-    var payloadString = String(user == null ? '' : user) + '|' + expMs;
+    var version = normalizeTokenVersion_(tokenVersion);
+    var payloadString = String(user == null ? '' : user) + '|' + version + '|' + expMs;
     var encoded = base64urlEncode_(payloadString);
     var signature = String(hmacHexFn(secret, payloadString) || '');
     return encoded + '.' + signature;
   }
 
-  // 검증: 토큰·현재시각·비밀키·HMAC함수 → { ok, user, reason }.
-  // reason ∈ 'ok'|'malformed'|'expired'|'bad_signature'. 비밀키가 비었으면 쓰기 비활성(bad_signature).
-  function verifyAuthToken(token, nowMs, secret, hmacHexFn) {
+  // 검증: 토큰·현재시각·비밀키·HMAC함수·현재토큰버전 → { ok, user, reason }.
+  // reason ∈ 'ok'|'malformed'|'expired'|'bad_signature'|'revoked'. 비밀키가 비었으면 쓰기 비활성(bad_signature).
+  // 서명 유효성 → 버전 일치 순으로 검사한다(위조는 bad_signature, 구세대 정품 토큰은 revoked).
+  function verifyAuthToken(token, nowMs, secret, hmacHexFn, currentTokenVersion) {
     function fail(reason) { return { ok: false, user: null, reason: reason }; }
     if (typeof hmacHexFn !== 'function' || isBlank_(secret)) return fail('bad_signature');
     var text = String(token == null ? '' : token);
@@ -1346,10 +1357,15 @@ var CampCore = (function () {
     var signature = text.slice(dot + 1);
     var payloadString = base64urlDecode_(encodedPayload);
     if (payloadString == null) return fail('malformed');
+    // 페이로드 = user|version|expMs. 뒤에서부터 expMs, 그다음 version을 떼어낸다.
     var sep = payloadString.lastIndexOf('|');
     if (sep <= 0) return fail('malformed');
-    var user = payloadString.slice(0, sep);
+    var head = payloadString.slice(0, sep); // user|version
     var expText = payloadString.slice(sep + 1);
+    var vsep = head.lastIndexOf('|');
+    if (vsep < 0) return fail('malformed'); // 버전 세그먼트 필수(구형 2-파트 토큰은 여기서 거부 → 재로그인)
+    var user = head.slice(0, vsep);
+    var version = head.slice(vsep + 1);
     if (!/^\d+$/.test(expText)) return fail('malformed');
     var expMs = Number(expText);
     if (!Number.isFinite(expMs)) return fail('malformed');
@@ -1358,6 +1374,8 @@ var CampCore = (function () {
     var expected = String(hmacHexFn(secret, payloadString) || '').trim().toLowerCase();
     var actual = String(signature).trim().toLowerCase();
     if (!expected || !constantTimeEquals_(actual, expected)) return fail('bad_signature');
+    // 서명이 유효한 정품 토큰이라도 서버의 현재 세대와 다르면 무효화된 것으로 본다.
+    if (version !== normalizeTokenVersion_(currentTokenVersion)) return fail('revoked');
     return { ok: true, user: user, reason: 'ok' };
   }
 

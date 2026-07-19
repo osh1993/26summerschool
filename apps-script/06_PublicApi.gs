@@ -309,7 +309,13 @@ function doGet(e) {
 // ── 웹 관리자 쓰기 인증 유틸(Phase A) ─────────────────────────────────
 // 쓰기 토큰(issueAuthToken/verifyAuthToken)의 HMAC 서명은 Script Property CAMP_INTERNAL_TOKEN_SECRET을 주입해 계산한다.
 // 미설정이면 verifyAuthToken이 bad_signature로 전부 거부하므로 쓰기가 안전 기본값(비활성)으로 잠긴다.
-var INTERNAL_TOKEN_TTL_MS = 2 * 60 * 60 * 1000; // 발급 후 2시간 유효
+var INTERNAL_TOKEN_TTL_MS = 30 * 60 * 1000; // 발급 후 30분 유효(PII 노출창 축소). 만료 시 재로그인.
+
+// 토큰 세대(무효화 스위치). Script Property CAMP_INTERNAL_TOKEN_VERSION을 바꾸면 이전 세대 토큰이 전부 즉시 거부된다.
+// 미설정이면 '1'(Core.normalizeTokenVersion_ 기본과 동일)로 간주한다.
+function internalTokenVersion_() {
+  return PropertiesService.getScriptProperties().getProperty('CAMP_INTERNAL_TOKEN_VERSION') || '';
+}
 
 // Core.issueAuthToken/verifyAuthToken에 주입할 HMAC-SHA256 hex 래퍼(sha256Hex_ 바이트→hex 패턴과 동일).
 function hmacHex_(secret, message) {
@@ -392,9 +398,9 @@ function doPost(e) {
 
     // 로그인 외 모든 액션은 쓰기/구성 조회 — 비밀키가 없으면 토큰을 발급한 적이 없으므로 쓰기 비활성.
     if (isBlankSecret_(secret)) return jsonResponse_({ error: 'writes_disabled' });
-    // 토큰 검증: 만료는 token_expired, 변조/누락/빈서명은 unauthorized(힌트 없는 코드).
-    var verdict = CampCore.verifyAuthToken(body.token, Date.now(), secret, hmacHex_);
-    if (!verdict.ok) return jsonResponse_({ error: verdict.reason === 'expired' ? 'token_expired' : 'unauthorized' });
+    // 토큰 검증: 만료·무효화(세대 변경)는 token_expired(재로그인 유도), 변조/누락/빈서명은 unauthorized(힌트 없는 코드).
+    var verdict = CampCore.verifyAuthToken(body.token, Date.now(), secret, hmacHex_, internalTokenVersion_());
+    if (!verdict.ok) return jsonResponse_({ error: (verdict.reason === 'expired' || verdict.reason === 'revoked') ? 'token_expired' : 'unauthorized' });
 
     switch (action) {
       case 'get_config': return handleGetConfig_();
@@ -451,7 +457,7 @@ function handleLogin_(body, secret) {
   if (CampCore.blockingIssues(structural).length) return jsonResponse_({ error: 'temporarily_unavailable' });
   // 비밀키가 있으면 2시간 만료 쓰기 토큰을 함께 반환한다(구조 검증 이후에 붙여 검증 대상에서 제외).
   if (!isBlankSecret_(secret)) {
-    snapshot.token = CampCore.issueAuthToken(String(body.user == null ? '' : body.user).trim(), Date.now(), INTERNAL_TOKEN_TTL_MS, secret, hmacHex_);
+    snapshot.token = CampCore.issueAuthToken(String(body.user == null ? '' : body.user).trim(), Date.now(), INTERNAL_TOKEN_TTL_MS, secret, hmacHex_, internalTokenVersion_());
   }
   return jsonResponse_(snapshot);
 }
