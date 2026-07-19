@@ -471,6 +471,76 @@
           </div>
           <p id="config-vehicles-msg" class="config-msg" role="status" aria-live="polite" hidden></p>
         </section>
+
+        <!-- 6) 참석자 관리 (PII — 인증 관리자 전용) -->
+        <section class="config-block" aria-labelledby="config-participants-head">
+          <h3 id="config-participants-head" class="internal-subhead">참석자 관리</h3>
+          <p class="config-warn-banner" role="note">
+            <span aria-hidden="true">⚠️</span> 실명·연락처가 표시됩니다. 인증 관리자 전용 화면이며, 이 정보는 서버에서만 조회됩니다(정적 공개 금지).
+          </p>
+          <div class="config-participants-toolbar">
+            <label class="field field-wide">
+              <span class="sr-only">참석자 검색</span>
+              <input id="config-participants-search" type="search" placeholder="이름·구분·캠퍼스 검색" autocomplete="off">
+            </label>
+            <button id="config-participants-add" class="config-secondary" type="button"><span aria-hidden="true">＋</span> 신규 추가</button>
+          </div>
+          <div class="table-scroll">
+            <table class="roster-table config-table">
+              <caption class="sr-only">참석자 목록: 이름, 구분, 캠퍼스, 학년, 성별, 동의, 특성, 활성, 편집</caption>
+              <thead>
+                <tr>
+                  <th scope="col">이름</th>
+                  <th scope="col">구분</th>
+                  <th scope="col">캠퍼스</th>
+                  <th scope="col">학년</th>
+                  <th scope="col">성별</th>
+                  <th scope="col">동의</th>
+                  <th scope="col">특성</th>
+                  <th scope="col">활성</th>
+                  <th scope="col">편집</th>
+                </tr>
+              </thead>
+              <tbody id="config-participants-body"></tbody>
+            </table>
+          </div>
+          <p id="config-participants-msg" class="config-msg" role="status" aria-live="polite" hidden></p>
+
+          <!-- 편집 폼(인라인): 신규/수정 공용. 공개모델(enum 드롭다운) + 민감필드. -->
+          <form id="config-participant-form" class="internal-form config-participant-form" autocomplete="off" hidden>
+            <h4 id="config-participant-form-title" class="internal-subhead">참석자 편집</h4>
+            <input type="hidden" id="cp-participant_id">
+            <div class="config-participant-grid">
+              <label class="field"><span>이름 (실명)</span><input type="text" id="cp-legal_name" autocomplete="off"></label>
+              <label class="field"><span>공개 표시명</span><input type="text" id="cp-public_name" autocomplete="off" placeholder="비우면 마스킹 파생"></label>
+              <label class="field"><span>구분</span><select id="cp-person_type"></select></label>
+              <label class="field"><span>캠퍼스</span><select id="cp-campus"></select></label>
+              <label class="field"><span>학년</span><select id="cp-grade_band"></select></label>
+              <label class="field"><span>성별</span><select id="cp-gender"></select></label>
+              <label class="field"><span>적극성 (1~5)</span><input type="number" inputmode="numeric" min="1" max="5" id="cp-engagement_score"></label>
+              <label class="field"><span>외향성 (1~5)</span><input type="number" inputmode="numeric" min="1" max="5" id="cp-extraversion_score"></label>
+              <label class="field field-check"><input type="checkbox" id="cp-newcomer"><span>새친구</span></label>
+              <label class="field field-check"><input type="checkbox" id="cp-leader_candidate"><span>리더 후보</span></label>
+              <label class="field field-check"><input type="checkbox" id="cp-public_consent"><span>공개 동의</span></label>
+            </div>
+            <fieldset class="config-participant-private">
+              <legend><span aria-hidden="true">🔒</span> 민감정보 (Participant_Private에만 저장)</legend>
+              <div class="config-participant-grid">
+                <label class="field"><span>전화</span><input type="text" id="cp-phone" autocomplete="off"></label>
+                <label class="field"><span>생년월일</span><input type="text" id="cp-birth_date" autocomplete="off" placeholder="YYYY-MM-DD"></label>
+                <label class="field"><span>보호자 전화</span><input type="text" id="cp-guardian_phone" autocomplete="off"></label>
+                <label class="field"><span>보험 상태</span><input type="text" id="cp-insurance_status" autocomplete="off"></label>
+                <label class="field field-wide"><span>비공개 메모</span><input type="text" id="cp-private_note" autocomplete="off"></label>
+              </div>
+            </fieldset>
+            <div class="config-actions">
+              <button id="config-participant-save" class="config-save" type="submit"><span aria-hidden="true">💾</span> 저장</button>
+              <button id="config-participant-deactivate" class="config-secondary" type="button"><span aria-hidden="true">🚫</span> 비활성</button>
+              <button id="config-participant-cancel" class="config-secondary" type="button">닫기</button>
+            </div>
+            <p id="config-participant-form-msg" class="config-msg" role="status" aria-live="polite" hidden></p>
+          </form>
+        </section>
       </div>
     </section>
 
