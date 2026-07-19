@@ -306,7 +306,78 @@ function doGet(e) {
   }
 }
 
-// 인증 내부 뷰: {user, password}를 받아 Script Property의 공용 자격증명으로 검증한 뒤에만 실명 포함 내부 스냅샷을 반환한다.
+// ── 웹 관리자 쓰기 인증 유틸(Phase A) ─────────────────────────────────
+// 쓰기 토큰(issueAuthToken/verifyAuthToken)의 HMAC 서명은 Script Property CAMP_INTERNAL_TOKEN_SECRET을 주입해 계산한다.
+// 미설정이면 verifyAuthToken이 bad_signature로 전부 거부하므로 쓰기가 안전 기본값(비활성)으로 잠긴다.
+var INTERNAL_TOKEN_TTL_MS = 2 * 60 * 60 * 1000; // 발급 후 2시간 유효
+
+// Core.issueAuthToken/verifyAuthToken에 주입할 HMAC-SHA256 hex 래퍼(sha256Hex_ 바이트→hex 패턴과 동일).
+function hmacHex_(secret, message) {
+  var raw = Utilities.computeHmacSha256Signature(message, secret); // byte[]
+  return raw.map(function (b) {
+    var value = b < 0 ? b + 256 : b;
+    return ('0' + value.toString(16)).slice(-2);
+  }).join('');
+}
+
+function internalTokenSecret_() {
+  return PropertiesService.getScriptProperties().getProperty('CAMP_INTERNAL_TOKEN_SECRET') || '';
+}
+
+function isBlankSecret_(secret) {
+  return !secret || String(secret).trim() === '';
+}
+
+// 쓰기 액션 공통 잠금 래퍼. 문서 잠금이 불가하면 스크립트 잠금으로 대체한다. 반환값을 JSON 응답으로 감싼다.
+function withDocumentLock_(fn) {
+  var lock;
+  try { lock = LockService.getDocumentLock(); } catch (docLockError) { lock = null; }
+  if (!lock) lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    return fn();
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// 이슈(issue) 객체를 인증 운영자에게 돌려줄 안전한 형태로 축약한다(스택·시트·셀 없음, PII 없음).
+function mapAdminIssue_(row) {
+  return { code: row.rule_code, entity_type: row.entity_type, ref: row.entity_id, message: row.message_private };
+}
+function adminBlockingIssues_(issues) {
+  return (issues || []).filter(function (row) { return row.blocking !== false; }).map(mapAdminIssue_);
+}
+function adminWarnings_(issues) {
+  return (issues || []).filter(function (row) { return row.blocking === false; }).map(mapAdminIssue_);
+}
+
+// 로그인 브루트포스 경량 완화: 글로벌 실패 카운트를 CacheService로 10분 윈도우에 유지한다.
+var LOGIN_FAIL_CACHE_KEY = 'camp_internal_login_fail';
+var LOGIN_FAIL_MAX = 10;
+var LOGIN_FAIL_WINDOW_SEC = 600;
+function loginFailCache_() {
+  try { return CacheService.getScriptCache(); } catch (cacheError) { return null; }
+}
+function isLoginThrottled_() {
+  var cache = loginFailCache_();
+  if (!cache) return false;
+  return Number(cache.get(LOGIN_FAIL_CACHE_KEY) || 0) >= LOGIN_FAIL_MAX;
+}
+function registerLoginFailure_() {
+  var cache = loginFailCache_();
+  if (!cache) return;
+  var count = Number(cache.get(LOGIN_FAIL_CACHE_KEY) || 0) + 1;
+  cache.put(LOGIN_FAIL_CACHE_KEY, String(count), LOGIN_FAIL_WINDOW_SEC);
+}
+function resetLoginFailures_() {
+  var cache = loginFailCache_();
+  if (cache) cache.remove(LOGIN_FAIL_CACHE_KEY);
+}
+
+// 인증 내부 뷰 + 웹 관리자 쓰기 라우팅.
+// - action 없음/'login': {user,password} 서버 검증 → 내부 스냅샷(+비밀키 있으면 쓰기 토큰) 반환.
+// - 그 외 액션: 토큰 검증 후 구성 조회/저장. 비밀키 미설정이면 쓰기 액션은 writes_disabled로 거부.
 // 성공해도 정적 파일로 저장하지 않는다. 실패/미설정/오류 시에는 힌트 없는 오류만 반환한다.
 function doPost(e) {
   try {
@@ -314,22 +385,438 @@ function doPost(e) {
     if (e && e.postData && e.postData.contents) {
       try { body = JSON.parse(e.postData.contents) || {}; } catch (parseError) { body = {}; }
     }
-    var props = PropertiesService.getScriptProperties();
-    var storedUser = props.getProperty('CAMP_INTERNAL_USER');
-    var storedPwHash = props.getProperty('CAMP_INTERNAL_PW_HASH');
-    // Script Property 미설정이면 verifyInternalCredential이 false를 반환하므로 자연히 unauthorized가 된다.
-    var authorized = CampCore.verifyInternalCredential(body.user, body.password, storedUser, storedPwHash, sha256Hex_);
-    if (!authorized) return jsonResponse_({ error: 'unauthorized' });
-    var data = readOperationalData_();
-    var snapshot = buildInternalSnapshot_(data);
-    // 내부 스냅샷 구조를 점검하되, 개인 민감 원문(전화/생년월일 등)만 유출 카나리로 검사한다(실명·내부ID는 내부뷰 정상 노출).
-    var structural = CampCore.validateInternalSnapshot(snapshot, collectPrivateCanaries_(data));
-    if (CampCore.blockingIssues(structural).length) return jsonResponse_({ error: 'temporarily_unavailable' });
-    return jsonResponse_(snapshot);
+    var action = String(body.action == null ? '' : body.action).trim() || 'login';
+    var secret = internalTokenSecret_();
+
+    if (action === 'login') return handleLogin_(body, secret);
+
+    // 로그인 외 모든 액션은 쓰기/구성 조회 — 비밀키가 없으면 토큰을 발급한 적이 없으므로 쓰기 비활성.
+    if (isBlankSecret_(secret)) return jsonResponse_({ error: 'writes_disabled' });
+    // 토큰 검증: 만료는 token_expired, 변조/누락/빈서명은 unauthorized(힌트 없는 코드).
+    var verdict = CampCore.verifyAuthToken(body.token, Date.now(), secret, hmacHex_);
+    if (!verdict.ok) return jsonResponse_({ error: verdict.reason === 'expired' ? 'token_expired' : 'unauthorized' });
+
+    switch (action) {
+      case 'get_config': return handleGetConfig_();
+      case 'save_settings': return withDocumentLock_(function () { return handleSaveSettings_(body); });
+      case 'save_field_map': return withDocumentLock_(function () { return handleSaveFieldMap_(body); });
+      case 'save_groups': return withDocumentLock_(function () { return handleSaveGroups_(body); });
+      case 'save_rooms': return withDocumentLock_(function () { return handleSaveRooms_(body); });
+      case 'save_vehicles': return withDocumentLock_(function () { return handleSaveVehicles_(body); });
+      case 'ensure_group_count': return runMenuMutation_(ensureGroupCountFromSettings);
+      case 'ensure_room_count': return runMenuMutation_(ensureRoomCountFromSettings);
+      default: return jsonResponse_({ error: 'not_found' });
+    }
   } catch (error) {
-    // 내부 응답 오류에도 스택, 시트명, 셀 범위, 내부 ID를 포함하지 않는다.
+    // 응답 오류에도 스택, 시트명, 셀 범위, 내부 ID를 포함하지 않는다.
     return jsonResponse_({ error: 'temporarily_unavailable' });
   }
+}
+
+// ensure*CountFromSettings는 스스로 문서 잠금을 잡고 마지막에 SpreadsheetApp.getUi().alert()를 호출한다.
+// 웹앱(doPost) 컨텍스트에는 UI가 없어 alert 지점에서 예외가 나지만, 행 개수 조정은 그 이전에 이미 커밋된다.
+// 따라서 getUi 관련 예외만 성공으로 간주하고, 그 외 예외는 그대로 전파해 temporarily_unavailable이 되게 한다.
+function runMenuMutation_(fn) {
+  try {
+    fn();
+    return jsonResponse_({ ok: true });
+  } catch (err) {
+    var msg = String(err && err.message ? err.message : err);
+    if (/getUi/i.test(msg)) return jsonResponse_({ ok: true });
+    throw err;
+  }
+}
+
+function handleLogin_(body, secret) {
+  var props = PropertiesService.getScriptProperties();
+  var storedUser = props.getProperty('CAMP_INTERNAL_USER');
+  var storedPwHash = props.getProperty('CAMP_INTERNAL_PW_HASH');
+  // 연속 실패가 임계치를 넘으면 잠시 거부한다(정답이어도 거부되지만 윈도우가 짧다). 힌트는 남기지 않는다.
+  if (isLoginThrottled_()) return jsonResponse_({ error: 'unauthorized' });
+  // Script Property 미설정이면 verifyInternalCredential이 false를 반환하므로 자연히 unauthorized가 된다.
+  var authorized = CampCore.verifyInternalCredential(body.user, body.password, storedUser, storedPwHash, sha256Hex_);
+  if (!authorized) {
+    registerLoginFailure_();
+    return jsonResponse_({ error: 'unauthorized' });
+  }
+  resetLoginFailures_();
+  var data = readOperationalData_();
+  var snapshot = buildInternalSnapshot_(data);
+  // 내부 스냅샷 구조를 점검하되, 개인 민감 원문(전화/생년월일 등)만 유출 카나리로 검사한다(실명·내부ID는 내부뷰 정상 노출).
+  var structural = CampCore.validateInternalSnapshot(snapshot, collectPrivateCanaries_(data));
+  if (CampCore.blockingIssues(structural).length) return jsonResponse_({ error: 'temporarily_unavailable' });
+  // 비밀키가 있으면 2시간 만료 쓰기 토큰을 함께 반환한다(구조 검증 이후에 붙여 검증 대상에서 제외).
+  if (!isBlankSecret_(secret)) {
+    snapshot.token = CampCore.issueAuthToken(String(body.user == null ? '' : body.user).trim(), Date.now(), INTERNAL_TOKEN_TTL_MS, secret, hmacHex_);
+  }
+  return jsonResponse_(snapshot);
+}
+
+// 시트 헤더 1행만 읽어 배열로 반환(원본 응답 탭의 질문 헤더 노출용, 값·개인정보 없음). 시트가 없으면 빈 배열.
+function readSheetHeaderRow_(sheetName) {
+  var name = String(sheetName == null ? '' : sheetName).trim();
+  if (!name) return [];
+  var sheet = campSpreadsheet_().getSheetByName(name);
+  if (!sheet || sheet.getLastColumn() < 1) return [];
+  return sheet.getRange(1, 1, 1, sheet.getLastColumn()).getDisplayValues()[0]
+    .map(function (h) { return String(h == null ? '' : h).trim(); })
+    .filter(function (h) { return h !== ''; });
+}
+
+// 특정 참조 시트의 key 열에 등장하는 id 집합(배정 보존 판정용).
+function referencedIdSet_(sheetName, key) {
+  var set = {};
+  tableRows_(getSheetRequired_(sheetName)).forEach(function (row) {
+    var value = String(row[key] == null ? '' : row[key]).trim();
+    if (value) set[value] = true;
+  });
+  return set;
+}
+
+// 여러 참조 시트를 합쳐 id 집합을 만든다.
+function referencedIdSetMulti_(refs) {
+  var set = {};
+  refs.forEach(function (ref) {
+    var one = referencedIdSet_(ref.sheet, ref.key);
+    Object.keys(one).forEach(function (id) { set[id] = true; });
+  });
+  return set;
+}
+
+function handleGetConfig_() {
+  var settingsAll = getSettings_();
+  var settings = {};
+  EDITABLE_SETTINGS_KEYS.forEach(function (key) {
+    settings[key] = settingsAll[key] == null ? '' : String(settingsAll[key]);
+  });
+
+  var fieldMap = tableRows_(getSheetRequired_(CAMP.SHEETS.FIELD_MAP)).map(function (row) {
+    return {
+      source_sheet: String(row.source_sheet == null ? '' : row.source_sheet),
+      source_header: String(row.source_header == null ? '' : row.source_header),
+      normalized_field: String(row.normalized_field == null ? '' : row.normalized_field),
+      required: CampCore.bool(row.required),
+      active: CampCore.bool(row.active)
+    };
+  });
+
+  var groupRefs = referencedIdSet_(CAMP.SHEETS.GROUP_ASSIGNMENTS, 'group_id');
+  var groups = tableRows_(getSheetRequired_(CAMP.SHEETS.GROUPS)).map(function (row) {
+    var id = String(row.group_id == null ? '' : row.group_id);
+    return {
+      group_id: id,
+      display_name: String(row.display_name == null ? '' : row.display_name),
+      color: String(row.color == null ? '' : row.color),
+      target_size: numOrBlank_(row.target_size),
+      min_size: numOrBlank_(row.min_size),
+      max_size: numOrBlank_(row.max_size),
+      active: CampCore.bool(row.active),
+      has_assignments: !!groupRefs[id]
+    };
+  });
+
+  var roomRefs = referencedIdSet_(CAMP.SHEETS.ROOM_ASSIGNMENTS, 'room_id');
+  var rooms = tableRows_(getSheetRequired_(CAMP.SHEETS.ROOMS)).map(function (row) {
+    var id = String(row.room_id == null ? '' : row.room_id);
+    return {
+      room_id: id,
+      display_name: String(row.display_name == null ? '' : row.display_name),
+      capacity: numOrBlank_(row.capacity),
+      gender_scope: String(row.gender_scope == null ? '' : row.gender_scope),
+      floor: String(row.floor == null ? '' : row.floor),
+      active: CampCore.bool(row.active),
+      has_assignments: !!roomRefs[id]
+    };
+  });
+
+  var vehicleRefs = referencedIdSetMulti_([
+    { sheet: CAMP.SHEETS.TRIPS, key: 'vehicle_id' },
+    { sheet: CAMP.SHEETS.VEHICLE_AVAILABILITY, key: 'vehicle_id' }
+  ]);
+  var vehicles = tableRows_(getSheetRequired_(CAMP.SHEETS.VEHICLES)).map(function (row) {
+    var id = String(row.vehicle_id == null ? '' : row.vehicle_id);
+    return {
+      vehicle_id: id,
+      public_label: String(row.public_label == null ? '' : row.public_label),
+      capacity_total: numOrBlank_(row.capacity_total),
+      accessible: CampCore.bool(row.accessible),
+      active: CampCore.bool(row.active),
+      has_assignments: !!vehicleRefs[id]
+    };
+  });
+
+  var lookups = tableRows_(getSheetRequired_(CAMP.SHEETS.LOOKUPS)).map(function (row) {
+    return {
+      category: String(row.category == null ? '' : row.category),
+      value: String(row.value == null ? '' : row.value),
+      label: String(row.label == null ? '' : row.label),
+      active: CampCore.bool(row.active)
+    };
+  });
+
+  return jsonResponse_({
+    ok: true,
+    settings: settings,
+    field_map: fieldMap,
+    groups: groups,
+    rooms: rooms,
+    vehicles: vehicles,
+    lookups: lookups,
+    form_headers: {
+      students: readSheetHeaderRow_(settingsAll.RAW_STUDENT_SHEET || CAMP.SHEETS.RAW_STUDENTS),
+      staff: readSheetHeaderRow_(settingsAll.RAW_STAFF_SHEET || CAMP.SHEETS.RAW_STAFF)
+    }
+  });
+}
+
+// 숫자 값이면 문자열로, 비었으면 ''로 정규화(폼 편집용).
+function numOrBlank_(value) {
+  if (value == null || String(value).trim() === '') return '';
+  var n = Number(value);
+  return Number.isFinite(n) ? String(n) : String(value).trim();
+}
+
+function handleSaveSettings_(body) {
+  var result = CampCore.validateSettingsInput(body.payload);
+  if (!result.ok) return jsonResponse_({ error: 'invalid_input', issues: adminBlockingIssues_(result.issues) });
+  Object.keys(result.sanitized).forEach(function (key) { setSetting_(key, result.sanitized[key]); });
+  return jsonResponse_({ ok: true, warnings: adminWarnings_(result.issues) });
+}
+
+function clearDataRows_(sheet) {
+  var lastRow = sheet.getLastRow();
+  if (lastRow > 1) sheet.getRange(2, 1, lastRow - 1, sheet.getLastColumn()).clearContent();
+}
+
+// 유효 rows 가드: payload가 배열이 아니거나 비었으면 시트를 건드리지 않는다.
+// (빈/누락 payload로 전면 삭제·전면 비활성화되는 대량 소실 방지 — 정상 목록은 최소 1행 존재)
+function hasRows_(payload) {
+  return Array.isArray(payload) && payload.length > 0;
+}
+
+function handleSaveFieldMap_(body) {
+  // 인증·잠금 통과 이후, 시트 변경(clear/append) 이전 가드.
+  if (!hasRows_(body.payload)) return jsonResponse_({ error: 'invalid_input' });
+  var result = CampCore.validateFieldMapInput(body.payload);
+  if (!result.ok) return jsonResponse_({ error: 'invalid_input', issues: adminBlockingIssues_(result.issues) });
+  // 매핑은 외부(배정) 참조가 없어 전체 교체가 안전하다.
+  var sheet = getSheetRequired_(CAMP.SHEETS.FIELD_MAP);
+  clearDataRows_(sheet);
+  appendObjects_(CAMP.SHEETS.FIELD_MAP, result.sanitized.map(function (row) {
+    return {
+      source_sheet: row.source_sheet,
+      source_header: row.source_header,
+      normalized_field: row.normalized_field,
+      required: row.required,
+      active: row.active
+    };
+  }));
+  return jsonResponse_({ ok: true, warnings: adminWarnings_(result.issues) });
+}
+
+// idx[field] 열이 있으면 해당 셀만 수정한다(운영자 추가 열·미관리 필드는 건드리지 않음).
+function setCellIf_(sheet, rowNumber, idx, field, value) {
+  if (idx[field] == null) return;
+  sheet.getRange(rowNumber, idx[field] + 1).setValue(value == null ? '' : value);
+}
+
+function handleSaveGroups_(body) {
+  // 빈/누락 payload는 시트를 건드리지 않는다(전체 비활성화 방지). 정상 조 목록은 최소 1행 존재.
+  if (!hasRows_(body.payload)) return jsonResponse_({ error: 'invalid_input' });
+  var result = CampCore.validateGroupsInput(body.payload);
+  if (!result.ok) return jsonResponse_({ error: 'invalid_input', issues: adminBlockingIssues_(result.issues) });
+  var sheet = getSheetRequired_(CAMP.SHEETS.GROUPS);
+  var idx = headerIndex_(sheet);
+  var existing = tableRows_(sheet);
+  var byId = indexRowsById_(existing, 'group_id');
+  var refs = referencedIdSet_(CAMP.SHEETS.GROUP_ASSIGNMENTS, 'group_id');
+  var eventId = (getSettings_().EVENT_ID) || CAMP.DEFAULT_SETTINGS.EVENT_ID;
+  var warnings = [];
+  var seen = {};
+  var newObjects = [];
+
+  result.sanitized.forEach(function (clean) {
+    var id = (!isBlankValue_(clean.group_id) && byId[String(clean.group_id)]) ? String(clean.group_id) : '';
+    if (id) {
+      seen[id] = true;
+      var row = byId[id];
+      var wantActive = clean.active;
+      if (!wantActive && refs[id]) { wantActive = true; warnings.push({ code: 'GROUP_HAS_ASSIGNMENTS', entity_type: 'group', ref: id, message: '배정이 있어 비활성화하지 않았습니다.' }); }
+      setCellIf_(sheet, row._row, idx, 'display_name', clean.display_name);
+      setCellIf_(sheet, row._row, idx, 'color', clean.color == null ? '' : clean.color);
+      setCellIf_(sheet, row._row, idx, 'target_size', clean.target_size == null ? '' : clean.target_size);
+      setCellIf_(sheet, row._row, idx, 'min_size', clean.min_size == null ? '' : clean.min_size);
+      setCellIf_(sheet, row._row, idx, 'max_size', clean.max_size == null ? '' : clean.max_size);
+      setCellIf_(sheet, row._row, idx, 'active', wantActive);
+    } else {
+      // 신규: 충돌 없는 새 id를 발급한 뒤 사용자 값을 병합한다(id 재발급 금지 대상은 기존 행뿐).
+      var template = buildNewGroupRows_(existing.concat(newObjects), 1, eventId)[0];
+      seen[template.group_id] = true;
+      newObjects.push({
+        group_id: template.group_id,
+        event_id: eventId,
+        display_name: clean.display_name,
+        color: clean.color == null ? template.color : clean.color,
+        target_size: clean.target_size == null ? '' : clean.target_size,
+        min_size: clean.min_size == null ? '' : clean.min_size,
+        max_size: clean.max_size == null ? '' : clean.max_size,
+        active: clean.active
+      });
+    }
+  });
+
+  deactivateMissingRows_(sheet, idx, existing, 'group_id', seen, refs, warnings, 'GROUP_HAS_ASSIGNMENTS', 'group');
+  if (newObjects.length) appendObjects_(CAMP.SHEETS.GROUPS, newObjects);
+  return jsonResponse_({ ok: true, warnings: warnings.concat(adminWarnings_(result.issues)) });
+}
+
+function handleSaveRooms_(body) {
+  // 빈/누락 payload는 시트를 건드리지 않는다(전체 비활성화 방지). 정상 방 목록은 최소 1행 존재.
+  if (!hasRows_(body.payload)) return jsonResponse_({ error: 'invalid_input' });
+  var result = CampCore.validateRoomsInput(body.payload);
+  if (!result.ok) return jsonResponse_({ error: 'invalid_input', issues: adminBlockingIssues_(result.issues) });
+  var sheet = getSheetRequired_(CAMP.SHEETS.ROOMS);
+  var idx = headerIndex_(sheet);
+  var existing = tableRows_(sheet);
+  var byId = indexRowsById_(existing, 'room_id');
+  var refs = referencedIdSet_(CAMP.SHEETS.ROOM_ASSIGNMENTS, 'room_id');
+  var eventId = (getSettings_().EVENT_ID) || CAMP.DEFAULT_SETTINGS.EVENT_ID;
+  var warnings = [];
+  var seen = {};
+  var newObjects = [];
+
+  result.sanitized.forEach(function (clean) {
+    var id = (!isBlankValue_(clean.room_id) && byId[String(clean.room_id)]) ? String(clean.room_id) : '';
+    if (id) {
+      seen[id] = true;
+      var row = byId[id];
+      var wantActive = clean.active;
+      if (!wantActive && refs[id]) { wantActive = true; warnings.push({ code: 'ROOM_HAS_ASSIGNMENTS', entity_type: 'room', ref: id, message: '배정이 있어 비활성화하지 않았습니다.' }); }
+      setCellIf_(sheet, row._row, idx, 'display_name', clean.display_name);
+      setCellIf_(sheet, row._row, idx, 'capacity', clean.capacity);
+      setCellIf_(sheet, row._row, idx, 'gender_scope', clean.gender_scope);
+      setCellIf_(sheet, row._row, idx, 'floor', clean.floor == null ? '' : clean.floor);
+      setCellIf_(sheet, row._row, idx, 'active', wantActive);
+    } else {
+      var template = buildNewRoomRows_(existing.concat(newObjects), 1, eventId)[0];
+      seen[template.room_id] = true;
+      newObjects.push({
+        room_id: template.room_id,
+        event_id: eventId,
+        display_name: clean.display_name,
+        capacity: clean.capacity,
+        floor: clean.floor == null ? '' : clean.floor,
+        gender_scope: clean.gender_scope,
+        active: clean.active,
+        private_note: ''
+      });
+    }
+  });
+
+  deactivateMissingRows_(sheet, idx, existing, 'room_id', seen, refs, warnings, 'ROOM_HAS_ASSIGNMENTS', 'room');
+  if (newObjects.length) appendObjects_(CAMP.SHEETS.ROOMS, newObjects);
+  return jsonResponse_({ ok: true, warnings: warnings.concat(adminWarnings_(result.issues)) });
+}
+
+function handleSaveVehicles_(body) {
+  // 빈/누락 payload는 시트를 건드리지 않는다(전체 비활성화 방지). 정상 차량 목록은 최소 1행 존재.
+  if (!hasRows_(body.payload)) return jsonResponse_({ error: 'invalid_input' });
+  var result = CampCore.validateVehiclesInput(body.payload);
+  if (!result.ok) return jsonResponse_({ error: 'invalid_input', issues: adminBlockingIssues_(result.issues) });
+  var sheet = getSheetRequired_(CAMP.SHEETS.VEHICLES);
+  var idx = headerIndex_(sheet);
+  var existing = tableRows_(sheet);
+  var byId = indexRowsById_(existing, 'vehicle_id');
+  var refs = referencedIdSetMulti_([
+    { sheet: CAMP.SHEETS.TRIPS, key: 'vehicle_id' },
+    { sheet: CAMP.SHEETS.VEHICLE_AVAILABILITY, key: 'vehicle_id' }
+  ]);
+  var eventId = (getSettings_().EVENT_ID) || CAMP.DEFAULT_SETTINGS.EVENT_ID;
+  var warnings = [];
+  var seen = {};
+  var newObjects = [];
+
+  result.sanitized.forEach(function (clean) {
+    var id = (!isBlankValue_(clean.vehicle_id) && byId[String(clean.vehicle_id)]) ? String(clean.vehicle_id) : '';
+    if (id) {
+      seen[id] = true;
+      var row = byId[id];
+      var wantActive = clean.active;
+      if (!wantActive && refs[id]) { wantActive = true; warnings.push({ code: 'VEHICLE_HAS_ASSIGNMENTS', entity_type: 'vehicle', ref: id, message: '배정이 있어 비활성화하지 않았습니다.' }); }
+      setCellIf_(sheet, row._row, idx, 'public_label', clean.public_label);
+      setCellIf_(sheet, row._row, idx, 'capacity_total', clean.capacity_total);
+      setCellIf_(sheet, row._row, idx, 'accessible', clean.accessible);
+      setCellIf_(sheet, row._row, idx, 'active', wantActive);
+    } else {
+      var template = buildNewVehicleRows_(existing.concat(newObjects), 1, eventId)[0];
+      seen[template.vehicle_id] = true;
+      newObjects.push({
+        vehicle_id: template.vehicle_id,
+        event_id: eventId,
+        internal_label: '',
+        public_label: clean.public_label,
+        capacity_total: clean.capacity_total,
+        accessible: clean.accessible,
+        route_scope: '',
+        active: clean.active,
+        private_note: ''
+      });
+    }
+  });
+
+  deactivateMissingRows_(sheet, idx, existing, 'vehicle_id', seen, refs, warnings, 'VEHICLE_HAS_ASSIGNMENTS', 'vehicle');
+  if (newObjects.length) appendObjects_(CAMP.SHEETS.VEHICLES, newObjects);
+  return jsonResponse_({ ok: true, warnings: warnings.concat(adminWarnings_(result.issues)) });
+}
+
+// 기존 행을 id로 색인(빈 id는 제외). 첫 등장 행만 보존(중복 id 방어).
+function indexRowsById_(rows, idField) {
+  var map = {};
+  rows.forEach(function (row) {
+    var id = String(row[idField] == null ? '' : row[idField]).trim();
+    if (id && !map[id]) map[id] = row;
+  });
+  return map;
+}
+
+// payload에서 빠진 기존 행: 배정 참조가 있으면 보존+경고, 없으면 active=false(물리 삭제·id 재발급 없음).
+function deactivateMissingRows_(sheet, idx, existing, idField, seen, refs, warnings, warnCode, entityType) {
+  existing.forEach(function (row) {
+    var id = String(row[idField] == null ? '' : row[idField]).trim();
+    if (!id || seen[id]) return;
+    if (refs[id]) {
+      warnings.push({ code: warnCode, entity_type: entityType, ref: id, message: '목록에서 빠졌지만 배정이 있어 보존했습니다.' });
+    } else if (CampCore.bool(row.active) && idx.active != null) {
+      sheet.getRange(row._row, idx.active + 1).setValue(false);
+    }
+  });
+}
+
+// 기존 차량 번호와 겹치지 않는 신규 차량 행을 생성한다. 기본 공개표시명은 'N호차', 정원은 사용자가 채운다.
+function buildNewVehicleRows_(existingRows, count, eventId) {
+  var maxNumber = 0;
+  existingRows.forEach(function (row) {
+    var match = String(row.vehicle_id || '').match(/(\d+)/);
+    if (match) maxNumber = Math.max(maxNumber, Number(match[1]));
+    var labelMatch = String(row.public_label || '').match(/(\d+)/);
+    if (labelMatch) maxNumber = Math.max(maxNumber, Number(labelMatch[1]));
+  });
+  var rows = [];
+  for (var i = 1; i <= count; i += 1) {
+    var n = maxNumber + i;
+    rows.push({
+      vehicle_id: 'V' + String(n).padStart(2, '0'),
+      event_id: eventId,
+      internal_label: '',
+      public_label: n + '호차',
+      capacity_total: '',
+      accessible: false,
+      route_scope: '',
+      active: true,
+      private_note: ''
+    });
+  }
+  return rows;
 }
 
 function jsonResponse_(payload) {

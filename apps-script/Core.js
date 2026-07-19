@@ -1235,6 +1235,338 @@ var CampCore = (function () {
     return { toSetPresent: toSetPresent, toSetAbsent: toSetAbsent, unchanged: unchanged, lockedSkipped: lockedSkipped };
   }
 
+  // ── 만료 토큰(순수, HMAC 함수 주입) ───────────────────────────────────
+  // 웹 관리자 쓰기 인증용 서명 토큰. 비밀번호를 매 요청 재전송하지 않도록 로그인 성공 시 발급한다.
+  // 형식: base64url(user + '|' + expMs) + '.' + hmacHexFn(secret, payloadString)
+  // 해시(HMAC-SHA256 hex)는 verifyInternalCredential과 동일하게 함수 주입 방식이다.
+  //   - Apps Script: Utilities.computeHmacSha256Signature 래퍼를 06_PublicApi가 주입.
+  //   - Node 테스트: crypto의 HMAC-SHA256 hex를 주입.
+  // base64url은 Utilities/Buffer 비의존 순수 구현이라 Apps Script·Node 모두에서 동일하게 동작한다.
+  var BASE64URL_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+
+  // 문자열 → UTF-8 바이트 배열(비-ASCII 이름 안전 처리).
+  function utf8Bytes_(str) {
+    var text = String(str == null ? '' : str);
+    var bytes = [];
+    for (var i = 0; i < text.length; i += 1) {
+      var code = text.charCodeAt(i);
+      if (code < 0x80) {
+        bytes.push(code);
+      } else if (code < 0x800) {
+        bytes.push(0xc0 | (code >> 6), 0x80 | (code & 0x3f));
+      } else if (code >= 0xd800 && code <= 0xdbff) {
+        // 서로게이트 쌍 → 4바이트 코드포인트
+        var lo = text.charCodeAt(i + 1);
+        var cp = 0x10000 + ((code - 0xd800) << 10) + (lo - 0xdc00);
+        i += 1;
+        bytes.push(0xf0 | (cp >> 18), 0x80 | ((cp >> 12) & 0x3f), 0x80 | ((cp >> 6) & 0x3f), 0x80 | (cp & 0x3f));
+      } else {
+        bytes.push(0xe0 | (code >> 12), 0x80 | ((code >> 6) & 0x3f), 0x80 | (code & 0x3f));
+      }
+    }
+    return bytes;
+  }
+
+  // UTF-8 바이트 배열 → 문자열.
+  function bytesToUtf8_(bytes) {
+    var out = '';
+    var i = 0;
+    while (i < bytes.length) {
+      var b = bytes[i++];
+      if (b < 0x80) {
+        out += String.fromCharCode(b);
+      } else if (b >= 0xc0 && b < 0xe0) {
+        out += String.fromCharCode(((b & 0x1f) << 6) | (bytes[i++] & 0x3f));
+      } else if (b >= 0xe0 && b < 0xf0) {
+        out += String.fromCharCode(((b & 0x0f) << 12) | ((bytes[i++] & 0x3f) << 6) | (bytes[i++] & 0x3f));
+      } else {
+        var cp = ((b & 0x07) << 18) | ((bytes[i++] & 0x3f) << 12) | ((bytes[i++] & 0x3f) << 6) | (bytes[i++] & 0x3f);
+        cp -= 0x10000;
+        out += String.fromCharCode(0xd800 + (cp >> 10), 0xdc00 + (cp & 0x3ff));
+      }
+    }
+    return out;
+  }
+
+  function base64urlEncode_(str) {
+    var bytes = utf8Bytes_(str);
+    var out = '';
+    for (var i = 0; i < bytes.length; i += 3) {
+      var b0 = bytes[i];
+      var b1 = i + 1 < bytes.length ? bytes[i + 1] : null;
+      var b2 = i + 2 < bytes.length ? bytes[i + 2] : null;
+      out += BASE64URL_CHARS.charAt(b0 >> 2);
+      out += BASE64URL_CHARS.charAt(((b0 & 3) << 4) | ((b1 == null ? 0 : b1) >> 4));
+      out += b1 == null ? '' : BASE64URL_CHARS.charAt(((b1 & 15) << 2) | ((b2 == null ? 0 : b2) >> 6));
+      out += b2 == null ? '' : BASE64URL_CHARS.charAt(b2 & 63);
+    }
+    return out; // base64url: 패딩('=') 없음
+  }
+
+  // 유효하지 않은 문자가 있으면 null(malformed 신호).
+  function base64urlDecode_(str) {
+    var s = String(str == null ? '' : str);
+    if (s === '') return '';
+    var bytes = [];
+    var buffer = 0;
+    var bits = 0;
+    for (var i = 0; i < s.length; i += 1) {
+      var idx = BASE64URL_CHARS.indexOf(s.charAt(i));
+      if (idx < 0) return null;
+      buffer = (buffer << 6) | idx;
+      bits += 6;
+      if (bits >= 8) {
+        bits -= 8;
+        bytes.push((buffer >> bits) & 0xff);
+        buffer &= (1 << bits) - 1; // 소비한 상위 비트를 버려 32비트 오버플로를 방지
+      }
+    }
+    return bytesToUtf8_(bytes);
+  }
+
+  // 발급: user·발급시각·수명·비밀키·HMAC함수 → 서명 토큰 문자열.
+  function issueAuthToken(user, issuedAtMs, ttlMs, secret, hmacHexFn) {
+    if (typeof hmacHexFn !== 'function') throw new Error('hmacHexFn required');
+    var expMs = number(issuedAtMs, 0) + number(ttlMs, 0);
+    var payloadString = String(user == null ? '' : user) + '|' + expMs;
+    var encoded = base64urlEncode_(payloadString);
+    var signature = String(hmacHexFn(secret, payloadString) || '');
+    return encoded + '.' + signature;
+  }
+
+  // 검증: 토큰·현재시각·비밀키·HMAC함수 → { ok, user, reason }.
+  // reason ∈ 'ok'|'malformed'|'expired'|'bad_signature'. 비밀키가 비었으면 쓰기 비활성(bad_signature).
+  function verifyAuthToken(token, nowMs, secret, hmacHexFn) {
+    function fail(reason) { return { ok: false, user: null, reason: reason }; }
+    if (typeof hmacHexFn !== 'function' || isBlank_(secret)) return fail('bad_signature');
+    var text = String(token == null ? '' : token);
+    var dot = text.indexOf('.');
+    if (dot <= 0 || dot >= text.length - 1) return fail('malformed');
+    var encodedPayload = text.slice(0, dot);
+    var signature = text.slice(dot + 1);
+    var payloadString = base64urlDecode_(encodedPayload);
+    if (payloadString == null) return fail('malformed');
+    var sep = payloadString.lastIndexOf('|');
+    if (sep <= 0) return fail('malformed');
+    var user = payloadString.slice(0, sep);
+    var expText = payloadString.slice(sep + 1);
+    if (!/^\d+$/.test(expText)) return fail('malformed');
+    var expMs = Number(expText);
+    if (!Number.isFinite(expMs)) return fail('malformed');
+    // 만료 확인 → HMAC 재계산 후 상수시간 비교(hex 대소문자 무관).
+    if (!(expMs > number(nowMs, 0))) return fail('expired');
+    var expected = String(hmacHexFn(secret, payloadString) || '').trim().toLowerCase();
+    var actual = String(signature).trim().toLowerCase();
+    if (!expected || !constantTimeEquals_(actual, expected)) return fail('bad_signature');
+    return { ok: true, user: user, reason: 'ok' };
+  }
+
+  // ── 웹 관리자 쓰기 입력 검증(순수) ────────────────────────────────────
+  // 각 함수는 { ok, issues[], sanitized } 를 반환한다(ok = 차단 이슈 없음). 시트 I/O는 06_PublicApi가 담당한다.
+  // 편집 허용 Settings 키 화이트리스트. 00_Config.gs의 EDITABLE_SETTINGS_KEYS와 반드시 동일하게 유지한다.
+  // (LAST_SYNC_ROW_*·PUBLISH_*·ROSTER_*·EVENT_ID·LAST_PUBLISH_ID 등 커서/상태/식별키는 편집 금지)
+  var EDITABLE_SETTINGS_KEYS = ['EVENT_NAME', 'EVENT_START_DATE', 'EVENT_END_DATE', 'GROUP_COUNT', 'ROOM_COUNT', 'ATTENDANCE_SOURCE_HEADER', 'RAW_STUDENT_SHEET', 'RAW_STAFF_SHEET'];
+  var SETTINGS_DATE_KEYS = ['EVENT_START_DATE', 'EVENT_END_DATE'];
+  var SETTINGS_COUNT_KEYS = ['GROUP_COUNT', 'ROOM_COUNT'];
+  var SETTINGS_COUNT_MAX = 50; // 과도 입력 방지 상한
+  var FIELD_MAP_SOURCES = ['Form_Raw_Students', 'Form_Raw_Staff', 'Roster_Import'];
+  // 02_FormSync/07_RosterImport 정규화 어휘와 동일해야 한다(민감필드 포함 — 라우팅은 routePrivateFields가 담당).
+  var NORMALIZED_FIELDS = ['legal_name', 'person_type', 'campus', 'grade_band', 'gender', 'engagement_score', 'extraversion_score', 'newcomer', 'leader_candidate', 'phone', 'birth_date', 'guardian_phone', 'insurance_status', 'private_note', 'free_text'];
+
+  // 실제 달력 날짜(YYYY-MM-DD)인지 검증(2026-13-40 등 거부).
+  function isCalendarDate_(value) {
+    var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value == null ? '' : value).trim());
+    if (!m) return false;
+    var y = Number(m[1]), mo = Number(m[2]), d = Number(m[3]);
+    var dt = new Date(Date.UTC(y, mo - 1, d));
+    return dt.getUTCFullYear() === y && dt.getUTCMonth() === mo - 1 && dt.getUTCDate() === d;
+  }
+
+  // 정수 필드 파싱: 빈값 → undefined(미지정), 정수 → 숫자, 그 외 → NaN(무효).
+  function toIntField_(value) {
+    if (isBlank_(value)) return undefined;
+    var n = Number(value);
+    return Number.isInteger(n) ? n : NaN;
+  }
+
+  function validationResult_(issues, sanitized) {
+    return { ok: blockingIssues(issues).length === 0, issues: issues, sanitized: sanitized };
+  }
+
+  function validateSettingsInput(obj) {
+    var issues = [];
+    var sanitized = {};
+    if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
+      issues.push(issue('SETTINGS_INPUT_INVALID', 'settings', '', '설정 입력이 객체가 아닙니다.'));
+      return validationResult_(issues, sanitized);
+    }
+    Object.keys(obj).forEach(function (key) {
+      if (EDITABLE_SETTINGS_KEYS.indexOf(key) < 0) {
+        issues.push(issue('SETTINGS_KEY_NOT_EDITABLE', 'settings', key, '편집이 허용되지 않은 설정 키입니다.'));
+        return;
+      }
+      var value = obj[key];
+      if (SETTINGS_DATE_KEYS.indexOf(key) >= 0) {
+        var d = String(value == null ? '' : value).trim();
+        if (d === '') { sanitized[key] = ''; return; } // 빈값은 '미정'으로 허용
+        if (!isCalendarDate_(d)) {
+          issues.push(issue('SETTINGS_DATE_INVALID', 'settings', key, '날짜는 YYYY-MM-DD 형식이어야 합니다.'));
+          return;
+        }
+        sanitized[key] = d;
+      } else if (SETTINGS_COUNT_KEYS.indexOf(key) >= 0) {
+        var n = toIntField_(value);
+        if (n === undefined || Number.isNaN(n) || n <= 0 || n > SETTINGS_COUNT_MAX) {
+          issues.push(issue('SETTINGS_COUNT_INVALID', 'settings', key, '개수는 1 이상 ' + SETTINGS_COUNT_MAX + ' 이하의 정수여야 합니다.'));
+          return;
+        }
+        sanitized[key] = String(n); // Settings 값은 문자열로 저장
+      } else {
+        var s = String(value == null ? '' : value).trim();
+        if (s === '') {
+          issues.push(issue('SETTINGS_VALUE_BLANK', 'settings', key, '값이 비어 있어 저장하지 않습니다.', false, 'warning'));
+          return;
+        }
+        sanitized[key] = s;
+      }
+    });
+    return validationResult_(issues, sanitized);
+  }
+
+  function validateFieldMapInput(rows) {
+    var issues = [];
+    var sanitized = [];
+    (rows || []).forEach(function (row, i) {
+      row = row || {};
+      var ref = i;
+      var source = String(row.source_sheet == null ? '' : row.source_sheet).trim();
+      var field = String(row.normalized_field == null ? '' : row.normalized_field).trim();
+      if (FIELD_MAP_SOURCES.indexOf(source) < 0) {
+        issues.push(issue('FIELD_MAP_SOURCE_INVALID', 'field_map', ref, '허용되지 않은 source_sheet입니다.'));
+        return;
+      }
+      if (NORMALIZED_FIELDS.indexOf(field) < 0) {
+        issues.push(issue('FIELD_MAP_FIELD_INVALID', 'field_map', ref, '어휘에 없는 normalized_field입니다.'));
+        return;
+      }
+      var header = String(row.source_header == null ? '' : row.source_header).trim();
+      if (header === '') {
+        issues.push(issue('FIELD_MAP_HEADER_BLANK', 'field_map', ref, 'source_header가 비어 있습니다.', false, 'warning'));
+      }
+      sanitized.push({
+        source_sheet: source,
+        source_header: header,
+        normalized_field: field,
+        required: bool(row.required),
+        active: row.active == null ? true : bool(row.active)
+      });
+    });
+    return validationResult_(issues, sanitized);
+  }
+
+  // 정수 크기 필드 검증 공통 처리: 무효면 이슈 push 후 false 반환.
+  function checkSizeField_(parsed, entityType, ref, field, minValue, issues) {
+    if (parsed === undefined) return true; // 미지정 허용(신규 등)
+    if (Number.isNaN(parsed) || parsed < minValue) {
+      issues.push(issue('SIZE_FIELD_INVALID', entityType, ref, field + '는 ' + minValue + ' 이상의 정수여야 합니다.'));
+      return false;
+    }
+    return true;
+  }
+
+  function validateGroupsInput(rows) {
+    var issues = [];
+    var sanitized = [];
+    (rows || []).forEach(function (row, i) {
+      row = row || {};
+      var ref = isBlank_(row.group_id) ? '#' + i : String(row.group_id).trim();
+      var name = String(row.display_name == null ? '' : row.display_name).trim();
+      if (name === '') {
+        issues.push(issue('GROUP_NAME_REQUIRED', 'group', ref, '조 표시명(display_name)이 필요합니다.'));
+        return;
+      }
+      var target = toIntField_(row.target_size);
+      var min = toIntField_(row.min_size);
+      var max = toIntField_(row.max_size);
+      var ok = true;
+      ok = checkSizeField_(target, 'group', ref, 'target_size', 0, issues) && ok;
+      ok = checkSizeField_(min, 'group', ref, 'min_size', 0, issues) && ok;
+      ok = checkSizeField_(max, 'group', ref, 'max_size', 0, issues) && ok;
+      if (!ok) return;
+      // 권장(위반 경고): min ≤ target ≤ max
+      if (isNum_(min) && isNum_(target) && min > target) issues.push(issue('GROUP_SIZE_ORDER', 'group', ref, 'min_size가 target_size보다 큽니다.', false, 'warning'));
+      if (isNum_(target) && isNum_(max) && target > max) issues.push(issue('GROUP_SIZE_ORDER', 'group', ref, 'target_size가 max_size보다 큽니다.', false, 'warning'));
+      if (isNum_(min) && isNum_(max) && min > max) issues.push(issue('GROUP_SIZE_ORDER', 'group', ref, 'min_size가 max_size보다 큽니다.', false, 'warning'));
+      var clean = { display_name: name, active: row.active == null ? true : bool(row.active) };
+      if (!isBlank_(row.group_id)) clean.group_id = String(row.group_id).trim(); // 기존 id 보존(신규는 비필수)
+      if (!isBlank_(row.color)) clean.color = String(row.color).trim();
+      if (isNum_(target)) clean.target_size = target;
+      if (isNum_(min)) clean.min_size = min;
+      if (isNum_(max)) clean.max_size = max;
+      sanitized.push(clean);
+    });
+    return validationResult_(issues, sanitized);
+  }
+
+  function isNum_(value) { return typeof value === 'number' && !Number.isNaN(value); }
+
+  function validateRoomsInput(rows) {
+    var issues = [];
+    var sanitized = [];
+    (rows || []).forEach(function (row, i) {
+      row = row || {};
+      var ref = isBlank_(row.room_id) ? '#' + i : String(row.room_id).trim();
+      var name = String(row.display_name == null ? '' : row.display_name).trim();
+      if (name === '') {
+        issues.push(issue('ROOM_NAME_REQUIRED', 'room', ref, '방 표시명(display_name)이 필요합니다.'));
+        return;
+      }
+      var cap = toIntField_(row.capacity);
+      if (cap === undefined || Number.isNaN(cap) || cap <= 0) {
+        issues.push(issue('ROOM_CAPACITY_INVALID', 'room', ref, 'capacity는 1 이상의 정수여야 합니다.'));
+        return;
+      }
+      var scope = String(row.gender_scope == null ? '' : row.gender_scope).trim().toLowerCase();
+      if (GENDER_SCOPES.indexOf(scope) < 0) {
+        issues.push(issue('ROOM_GENDER_SCOPE_INVALID', 'room', ref, 'gender_scope는 male/female/mixed 중 하나여야 합니다.'));
+        return;
+      }
+      var clean = { display_name: name, capacity: cap, gender_scope: scope, active: row.active == null ? true : bool(row.active) };
+      if (!isBlank_(row.room_id)) clean.room_id = String(row.room_id).trim(); // 기존 id 보존
+      if (!isBlank_(row.floor)) clean.floor = String(row.floor).trim();
+      sanitized.push(clean);
+    });
+    return validationResult_(issues, sanitized);
+  }
+
+  function validateVehiclesInput(rows) {
+    var issues = [];
+    var sanitized = [];
+    (rows || []).forEach(function (row, i) {
+      row = row || {};
+      var ref = isBlank_(row.vehicle_id) ? '#' + i : String(row.vehicle_id).trim();
+      var label = String(row.public_label == null ? '' : row.public_label).trim();
+      if (label === '') {
+        issues.push(issue('VEHICLE_LABEL_REQUIRED', 'vehicle', ref, '차량 공개표시명(public_label)이 필요합니다.'));
+        return;
+      }
+      var cap = toIntField_(row.capacity_total);
+      if (cap === undefined || Number.isNaN(cap) || cap < 2) {
+        issues.push(issue('VEHICLE_CAPACITY_INVALID', 'vehicle', ref, 'capacity_total은 2 이상의 정수여야 합니다(운전자 포함).'));
+        return;
+      }
+      var clean = {
+        public_label: label,
+        capacity_total: cap,
+        accessible: bool(row.accessible),
+        active: row.active == null ? true : bool(row.active)
+      };
+      if (!isBlank_(row.vehicle_id)) clean.vehicle_id = String(row.vehicle_id).trim(); // 기존 id 보존/신규
+      sanitized.push(clean);
+    });
+    return validationResult_(issues, sanitized);
+  }
+
   return {
     issue: issue,
     bool: bool,
@@ -1260,6 +1592,14 @@ var CampCore = (function () {
     computeGroupProposal: computeGroupProposal,
     maskSurname: maskSurname,
     verifyInternalCredential: verifyInternalCredential,
+    issueAuthToken: issueAuthToken,
+    verifyAuthToken: verifyAuthToken,
+    EDITABLE_SETTINGS_KEYS: EDITABLE_SETTINGS_KEYS,
+    validateSettingsInput: validateSettingsInput,
+    validateFieldMapInput: validateFieldMapInput,
+    validateGroupsInput: validateGroupsInput,
+    validateRoomsInput: validateRoomsInput,
+    validateVehiclesInput: validateVehiclesInput,
     sessionPartLabel: sessionPartLabel,
     tripTimeBucket: tripTimeBucket,
     presentSlotIds: presentSlotIds,

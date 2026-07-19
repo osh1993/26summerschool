@@ -53,6 +53,9 @@
       <button id="tab-internal" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="panel-internal" data-tab="internal" tabindex="-1">
         <span aria-hidden="true">🔒</span> 내부 명단
       </button>
+      <button id="tab-config" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="panel-config" data-tab="config" tabindex="-1">
+        <span aria-hidden="true">⚙️</span> 설정
+      </button>
     </nav>
 
     <section id="panel-trips" class="tab-panel" role="tabpanel" aria-labelledby="tab-trips">
@@ -291,6 +294,183 @@
             <tbody id="staff-table-body"></tbody>
           </table>
         </div>
+      </div>
+    </section>
+
+    <section id="panel-config" class="tab-panel" role="tabpanel" aria-labelledby="tab-config" hidden>
+      <div class="section-heading">
+        <div>
+          <p class="section-kicker">교역자·운영자 전용</p>
+          <h2>설정</h2>
+        </div>
+        <button id="config-reload" class="config-reload" type="button" hidden>
+          <span aria-hidden="true">↻</span> 새로고침
+        </button>
+      </div>
+
+      <!-- 로그인/토큰/샘플 상태 안내. 준비되지 않으면 편집 폼 대신 이 안내만 보인다. -->
+      <div id="config-gate" class="config-gate" role="status" aria-live="polite">
+        <p id="config-gate-text">내부 명단 탭에서 먼저 로그인하세요.</p>
+      </div>
+
+      <!-- Form 원본 헤더(질문) 드롭다운 소스. get_config로 채운다. -->
+      <datalist id="config-form-headers"></datalist>
+
+      <div id="config-body" hidden>
+        <p id="config-mode-note" class="config-mode-note" hidden></p>
+
+        <!-- 1) 운영 설정 -->
+        <section class="config-block" aria-labelledby="config-settings-head">
+          <h3 id="config-settings-head" class="internal-subhead">운영 설정</h3>
+          <form id="config-settings-form" class="internal-form config-settings" autocomplete="off">
+            <label class="field field-wide">
+              <span>행사 이름 (EVENT_NAME)</span>
+              <input type="text" data-setting="EVENT_NAME" autocomplete="off">
+            </label>
+            <label class="field">
+              <span>시작일 (EVENT_START_DATE)</span>
+              <input type="date" data-setting="EVENT_START_DATE" autocomplete="off">
+            </label>
+            <label class="field">
+              <span>종료일 (EVENT_END_DATE)</span>
+              <input type="date" data-setting="EVENT_END_DATE" autocomplete="off">
+            </label>
+            <label class="field">
+              <span>조 개수 (GROUP_COUNT)</span>
+              <input type="number" inputmode="numeric" min="1" max="50" data-setting="GROUP_COUNT" autocomplete="off">
+            </label>
+            <label class="field">
+              <span>방 개수 (ROOM_COUNT)</span>
+              <input type="number" inputmode="numeric" min="1" max="50" data-setting="ROOM_COUNT" autocomplete="off">
+            </label>
+            <label class="field field-wide">
+              <span>참석 열 헤더 (ATTENDANCE_SOURCE_HEADER)</span>
+              <input type="text" data-setting="ATTENDANCE_SOURCE_HEADER" autocomplete="off">
+            </label>
+            <label class="field field-wide">
+              <span>학생 원본 시트명 (RAW_STUDENT_SHEET)</span>
+              <input type="text" data-setting="RAW_STUDENT_SHEET" autocomplete="off">
+            </label>
+            <label class="field field-wide">
+              <span>교사 원본 시트명 (RAW_STAFF_SHEET)</span>
+              <input type="text" data-setting="RAW_STAFF_SHEET" autocomplete="off">
+            </label>
+            <div class="config-actions">
+              <button id="config-settings-save" class="config-save" type="submit"><span aria-hidden="true">💾</span> 설정 저장</button>
+              <button id="config-ensure-groups" class="config-secondary" type="button"><span aria-hidden="true">👥</span> 조 개수 맞추기</button>
+              <button id="config-ensure-rooms" class="config-secondary" type="button"><span aria-hidden="true">🛏️</span> 방 개수 맞추기</button>
+            </div>
+          </form>
+          <p id="config-settings-msg" class="config-msg" role="status" aria-live="polite" hidden></p>
+        </section>
+
+        <!-- 2) 매핑 위저드 -->
+        <section class="config-block" aria-labelledby="config-fieldmap-head">
+          <h3 id="config-fieldmap-head" class="internal-subhead">Form 필드 매핑</h3>
+          <p class="config-hint">원본 질문 헤더를 정규 필드로 연결합니다. 민감 필드는 자동으로 비공개 저장됩니다.</p>
+          <div class="table-scroll">
+            <table class="roster-table config-table">
+              <caption class="sr-only">필드 매핑: 원본 시트, 원본 헤더, 정규 필드, 필수, 활성, 삭제</caption>
+              <thead>
+                <tr>
+                  <th scope="col">원본 시트</th>
+                  <th scope="col">원본 헤더</th>
+                  <th scope="col">정규 필드</th>
+                  <th scope="col">필수</th>
+                  <th scope="col">활성</th>
+                  <th scope="col">삭제</th>
+                </tr>
+              </thead>
+              <tbody id="config-fieldmap-body"></tbody>
+            </table>
+          </div>
+          <div class="config-actions">
+            <button id="config-fieldmap-add" class="config-secondary" type="button"><span aria-hidden="true">＋</span> 행 추가</button>
+            <button id="config-fieldmap-save" class="config-save" type="button"><span aria-hidden="true">💾</span> 매핑 저장</button>
+          </div>
+          <p id="config-fieldmap-msg" class="config-msg" role="status" aria-live="polite" hidden></p>
+        </section>
+
+        <!-- 3) 조 편집 -->
+        <section class="config-block" aria-labelledby="config-groups-head">
+          <h3 id="config-groups-head" class="internal-subhead">조 편집</h3>
+          <div class="table-scroll">
+            <table class="roster-table config-table">
+              <caption class="sr-only">조 편집: 조 ID, 이름, 색, 목표·최소·최대 인원, 활성, 상태</caption>
+              <thead>
+                <tr>
+                  <th scope="col">조 ID</th>
+                  <th scope="col">이름</th>
+                  <th scope="col">색</th>
+                  <th scope="col">목표</th>
+                  <th scope="col">최소</th>
+                  <th scope="col">최대</th>
+                  <th scope="col">활성</th>
+                  <th scope="col">상태</th>
+                </tr>
+              </thead>
+              <tbody id="config-groups-body"></tbody>
+            </table>
+          </div>
+          <div class="config-actions">
+            <button id="config-groups-add" class="config-secondary" type="button"><span aria-hidden="true">＋</span> 조 추가</button>
+            <button id="config-groups-save" class="config-save" type="button"><span aria-hidden="true">💾</span> 조 저장</button>
+          </div>
+          <p id="config-groups-msg" class="config-msg" role="status" aria-live="polite" hidden></p>
+        </section>
+
+        <!-- 4) 방 편집 -->
+        <section class="config-block" aria-labelledby="config-rooms-head">
+          <h3 id="config-rooms-head" class="internal-subhead">방 편집</h3>
+          <div class="table-scroll">
+            <table class="roster-table config-table">
+              <caption class="sr-only">방 편집: 방 ID, 이름, 정원, 성별, 층, 활성, 상태</caption>
+              <thead>
+                <tr>
+                  <th scope="col">방 ID</th>
+                  <th scope="col">이름</th>
+                  <th scope="col">정원</th>
+                  <th scope="col">성별</th>
+                  <th scope="col">층</th>
+                  <th scope="col">활성</th>
+                  <th scope="col">상태</th>
+                </tr>
+              </thead>
+              <tbody id="config-rooms-body"></tbody>
+            </table>
+          </div>
+          <div class="config-actions">
+            <button id="config-rooms-add" class="config-secondary" type="button"><span aria-hidden="true">＋</span> 방 추가</button>
+            <button id="config-rooms-save" class="config-save" type="button"><span aria-hidden="true">💾</span> 방 저장</button>
+          </div>
+          <p id="config-rooms-msg" class="config-msg" role="status" aria-live="polite" hidden></p>
+        </section>
+
+        <!-- 5) 차량 편집 -->
+        <section class="config-block" aria-labelledby="config-vehicles-head">
+          <h3 id="config-vehicles-head" class="internal-subhead">차량 편집</h3>
+          <div class="table-scroll">
+            <table class="roster-table config-table">
+              <caption class="sr-only">차량 편집: 차량 ID, 공개 표시명, 전체 정원, 저상·휠체어, 활성, 상태</caption>
+              <thead>
+                <tr>
+                  <th scope="col">차량 ID</th>
+                  <th scope="col">공개 표시명</th>
+                  <th scope="col">전체 정원</th>
+                  <th scope="col">휠체어</th>
+                  <th scope="col">활성</th>
+                  <th scope="col">상태</th>
+                </tr>
+              </thead>
+              <tbody id="config-vehicles-body"></tbody>
+            </table>
+          </div>
+          <div class="config-actions">
+            <button id="config-vehicles-add" class="config-secondary" type="button"><span aria-hidden="true">＋</span> 차량 추가</button>
+            <button id="config-vehicles-save" class="config-save" type="button"><span aria-hidden="true">💾</span> 차량 저장</button>
+          </div>
+          <p id="config-vehicles-msg" class="config-msg" role="status" aria-live="polite" hidden></p>
+        </section>
       </div>
     </section>
 
